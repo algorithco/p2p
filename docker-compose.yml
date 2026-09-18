@@ -15,7 +15,9 @@
 # For production TLS (Telegram Mini App requires HTTPS public URL):
 #   - Put frontend+backend behind Caddy/nginx (set WEBAPP_URL=https://your-domain, FRONTEND_URL same)
 #   - Or host tonconnect-manifest.json on GitHub raw (see tonconnect-manifest.json + webapp/public/tonconnect-manifest.json)
-#   - Ensure POSTGRES_PASSWORD, SIGNER_API_KEY, UBOT_API_KEY, UTRADE_API_KEY, ENCRYPTION_KEY are strong (32+ hex chars, 64 hex for ENCRYPTION_KEY)
+#   - Ensure POSTGRES_PASSWORD, SIGNER_API_KEY, UBOT_API_KEY, UTRADE_API_KEY, ENCRYPTION_KEY are strong:
+#     POSTGRES_PASSWORD: openssl rand -base64 32 (required, no default — see .env.example)
+#     API keys: 32+ random chars; ENCRYPTION_KEY: openssl rand -hex 32 (64 hex)
 #
 # Micro-architecture: each service is independently buildable/scalable, isolated network escrow-net.
 #  - backend:3000 API-only (no static, SERVE_STATIC=false) — CORS allows frontend origin
