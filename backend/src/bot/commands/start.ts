@@ -6,7 +6,7 @@ import { webAppButton } from '../keyboards';
 
 function welcomeText(): string {
   return [
-    `🛡️ <b>TonEscrow — xavfsiz P2P savdo</b>`,
+    `🛡️ <b>Savdochi — xavfsiz P2P savdo</b>`,
     ``,
     `Bu bot pulni tovar/xizmat topshirilgunga qadar ushlab turadi. To'lov <b>TON</b> yoki <b>USDT</b> da, to'g'ridan-to'g'ri blokcheynda.`,
     ``,
@@ -153,10 +153,23 @@ export function registerCommands(bot: Bot) {
         getMonthlyBuyerRatingSafe('TON', 5),
         getMonthlyBuyerRatingSafe('USDT', 5),
       ]);
-      await ctx.reply(formatRating(ton, usdt), { parse_mode: 'HTML' });
+      const text = formatRating(ton, usdt);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: helpKeyboard() });
+      } catch {
+        await ctx.reply(text, { parse_mode: 'HTML', reply_markup: helpKeyboard() });
+      }
     } catch (e) {
       logger.warn('/reyting inline failed', e);
-      await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.');
+      try {
+        await ctx.editMessageText('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.', {
+          reply_markup: helpKeyboard(),
+        });
+      } catch {
+        await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.', {
+          reply_markup: helpKeyboard(),
+        });
+      }
     }
   });
   bot.command('help', async (ctx) => {
