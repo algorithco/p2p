@@ -262,10 +262,7 @@
       ? otherRole + ' · ID ' + otherId
       : (deal.buyer_telegram_id ? 'Xaridor ' + deal.buyer_telegram_id : 'Ochiq bitim') +
         (deal.seller_telegram_id ? ' · Sotuvchi ' + deal.seller_telegram_id : '');
-    var chev = UI.h('div', {
-      class: 'deal-chevron',
-      html: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18 15 12 9 6"/></svg>',
-    });
+    var chev = UI.h('div', { class: 'deal-chevron' }, [UI.icon('chevron-down', 'ico-chev')]);
 
     return UI.h(
       'button',
@@ -285,7 +282,27 @@
           ]),
           UI.h('div', { class: 'deal-amt' }, [
             UI.h('b', { text: UI.fmtAmount(deal.amount) + ' ' + am.symbol }),
-            UI.h('div', {}, [UI.h('span', { class: 'badge ' + sm.cls, text: sm.label, style: 'margin-top:5px' })]),
+            UI.h('div', {}, [
+              UI.h(
+                'span',
+                { class: 'badge ' + sm.cls, style: 'margin-top:5px' },
+                (function () {
+                  var st = String(deal.status || '').toUpperCase();
+                  var kids = [];
+                  if (st === 'RELEASE_PENDING' || st === 'REFUND_PENDING') kids.push(UI.icon('clock', ''));
+                  else if (st === 'RELEASED') kids.push(UI.icon('circle-check-big', 'ico-pop'));
+                  else {
+                    try {
+                      var c = deal.confirmations;
+                      if (typeof c === 'string') c = JSON.parse(c);
+                      if (c && c.disputed === true) kids.push(UI.icon('alarm-clock', 'ico-ring'));
+                    } catch (e) {}
+                  }
+                  kids.push(UI.h('span', { text: sm.label }));
+                  return kids;
+                })(),
+              ),
+            ]),
           ]),
           chev,
         ]),
@@ -523,7 +540,7 @@
             doApprove(r, [approveBtn, rejectBtn]);
           },
         },
-        ['✅ Tasdiqlash'],
+        [UI.icon('circle-check-big', 'ico-pop'), ' Tasdiqlash'],
       );
       rejectBtn = UI.h(
         'button',
@@ -534,7 +551,7 @@
             doReject(r, [approveBtn, rejectBtn]);
           },
         },
-        ['Rad etish'],
+        [UI.icon('trash-2', 'ico-shake'), ' Rad etish'],
       );
       var card = UI.h('div', { class: 'studio-card inbox-card', style: compact ? 'margin-bottom:8px' : '' }, [
         UI.h('div', { class: 'studio-head' }, [
@@ -772,6 +789,7 @@
         },
         [
           UI.h('span', { class: 'mono', text: UI.truncate(friendly, 10, 8) }),
+          UI.icon('copy', 'ico-tap'),
           UI.h('span', { class: 'small muted', text: 'nusxa' }),
         ],
       ),
@@ -781,14 +799,17 @@
       ]),
       balRow,
       UI.h('div', { style: 'display:flex;gap:8px;margin-top:12px' }, [
-        UI.h('button', {
-          class: 'btn btn-ghost',
-          style: 'flex:1',
-          onclick: function () {
-            UI.sheetClose();
+        UI.h(
+          'button',
+          {
+            class: 'btn btn-ghost',
+            style: 'flex:1',
+            onclick: function () {
+              UI.sheetClose();
+            },
           },
-          text: 'Yopish',
-        }),
+          [UI.icon('cross', ''), ' Yopish'],
+        ),
         UI.h(
           'button',
           {
@@ -802,7 +823,7 @@
               });
             },
           },
-          ['Uzish'],
+          [UI.icon('unplug', 'ico-shake'), 'Uzish'],
         ),
       ]),
     ]);
@@ -879,7 +900,16 @@
         renderList();
       },
     });
-    var searchRow = UI.h('label', { class: 'search-row', style: 'margin-top:4px' }, [searchInputEl]);
+    var searchRow = UI.h('label', { class: 'search-row', style: 'margin-top:4px;position:relative' }, [
+      (function () {
+        var g = UI.icon('search', '');
+        g.style.cssText +=
+          ';position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.55;pointer-events:none';
+        return g;
+      })(),
+      searchInputEl,
+    ]);
+    searchInputEl.style.paddingLeft = '38px';
 
     var root = UI.h(
       'div',
@@ -888,14 +918,13 @@
         ptr,
         !TG.realUser()
           ? UI.h('div', { class: 'banner info' }, [
-              UI.h(
-                'div',
-                {},
+              UI.h('div', { style: 'display:flex;align-items:center;gap:8px' }, [
+                UI.icon('bot-off', ''),
                 UI.h('div', {
                   class: 'small',
                   text: "Ko'rib chiqish rejimi — to'liq ishlashi uchun sahifani Telegram ichida oching.",
                 }),
-              ),
+              ]),
             ])
           : null,
         heroEl,
@@ -1004,16 +1033,19 @@
             }),
             UI.h('h3', { text: 'Hech narsa topilmadi' }),
             UI.h('p', { text: '"' + App.state.searchQuery + "\" bo'yicha bitim yo'q — boshqa so'z bilan qidiring." }),
-            UI.h('button', {
-              class: 'btn btn-ghost',
-              style: 'width:auto;padding:10px 18px',
-              onclick: function () {
-                searchInputEl.value = '';
-                App.state.searchQuery = '';
-                renderList();
+            UI.h(
+              'button',
+              {
+                class: 'btn btn-ghost',
+                style: 'width:auto;padding:10px 18px',
+                onclick: function () {
+                  searchInputEl.value = '';
+                  App.state.searchQuery = '';
+                  renderList();
+                },
               },
-              text: 'Qidiruvni tozalash',
-            }),
+              [UI.icon('brush-cleaning', 'ico-shake'), ' Qidiruvni tozalash'],
+            ),
           ]);
           listBox.appendChild(nb);
           return;
@@ -1233,14 +1265,17 @@
           }),
           UI.h('div', { class: 'link-box' }, [
             UI.h('div', { class: 'mono', text: shareUrl }),
-            UI.h('button', {
-              class: 'icon-btn',
-              'aria-label': 'Havolani nusxalash',
-              html: '<svg viewBox="0 0 24 24" width="19" height="19"><path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2m0 16H8V7h11z"/></svg>',
-              onclick: function () {
-                UI.copy(shareUrl, 'Bot taklif havolasi nusxalandi');
+            UI.h(
+              'button',
+              {
+                class: 'icon-btn',
+                'aria-label': 'Havolani nusxalash',
+                onclick: function () {
+                  UI.copy(shareUrl, 'Bot taklif havolasi nusxalandi');
+                },
               },
-            }),
+              [UI.icon('copy', 'ico-tap')],
+            ),
           ]),
           UI.h('div', { class: 'btn-row' }, [
             UI.h(
@@ -1798,6 +1833,7 @@
           },
           [
             UI.h('span', { class: 'mono', text: UI.truncate(friendly, 10, 8) }),
+            UI.icon('copy', 'ico-tap'),
             UI.h('span', { class: 'small muted', text: 'nusxalash' }),
           ],
         ),
@@ -1980,6 +2016,7 @@
             },
             [
               UI.h('span', { class: 'mono', text: UI.truncate(UI.toFriendly(payTo), 10, 8) }),
+              UI.icon('copy', 'ico-tap'),
               UI.h('span', { class: 'small muted', text: 'nusxalash' }),
             ],
           ),
@@ -2242,7 +2279,7 @@
               go('#/deal/' + deal.id + '/chat');
             },
           },
-          ['💬 Bitim chati'],
+          [UI.icon('message-circle', 'ico-wiggle'), ' Bitim chati'],
         ),
       );
       actions.push(
@@ -2254,7 +2291,7 @@
               UI.copy(String(deal.id), 'Bitim ID nusxalandi');
             },
           },
-          ['Bitim ID nusxalash'],
+          [UI.icon('copy', 'ico-tap'), ' Bitim ID nusxalash'],
         ),
       );
 
@@ -2276,6 +2313,7 @@
               },
               [
                 UI.h('span', { class: 'mono', text: UI.truncate(addr, 10, 8) }),
+                UI.icon('copy', 'ico-tap'),
                 UI.h('span', { class: 'small muted', text: 'nusxalash uchun bosing' }),
               ],
             ),
@@ -2292,7 +2330,7 @@
                     TG.openLink('https://tonviewer.com/' + addr);
                   },
                 },
-                ["Tadqiqotchida ko'rish ↗"],
+                ["Tadqiqotchida ko'rish ", UI.icon('external-link', 'ico-ext')],
               ),
               UI.h('span', { class: 'chain-chip small muted', style: 'margin-left:auto', text: '' }),
             ]),
@@ -2538,20 +2576,23 @@
       if (nearBottom || list.length > prevCount) scroller.scrollTop = scroller.scrollHeight;
     }
 
+    function setStatus(icn, icls, text, color) {
+      statusBar.innerHTML = '';
+      if (icn) statusBar.appendChild(UI.icon(icn, icls || ''));
+      statusBar.appendChild(document.createTextNode((icn ? ' ' : '') + text));
+      statusBar.style.color = color || '';
+    }
     function updateStatus() {
       if (keyError) {
-        statusBar.textContent = '⛔ ' + keyError;
-        statusBar.style.color = '#ff6b6b';
+        setStatus('cross', '', keyError, '#ff6b6b');
         input.setAttribute('disabled', '');
         sendBtn.setAttribute('disabled', '');
       } else if (!keyReady) {
-        statusBar.textContent = "🔒 Shifrlangan kanal o'rnatilmoqda…";
-        statusBar.style.color = '';
+        setStatus('lock-keyhole', '', "Shifrlangan kanal o'rnatilmoqda…", '');
         input.setAttribute('disabled', '');
         sendBtn.setAttribute('disabled', '');
       } else {
-        statusBar.textContent = "🔒 Uchdan-uchga shifrlangan · faqat siz va sherigingiz o'qiy oladi";
-        statusBar.style.color = '#7dd3a5';
+        setStatus('lock-keyhole', '', "Uchdan-uchga shifrlangan · faqat siz va sherigingiz o'qiy oladi", '#7dd3a5');
         input.removeAttribute('disabled');
         sendBtn.removeAttribute('disabled');
       }
@@ -3053,7 +3094,7 @@
               },
             },
             [
-              UI.h('div', { class: 'li-icon', text: '📡' }),
+              UI.h('div', { class: 'li-icon' }, [UI.icon('router', App.state.apiOk ? 'ico-pulse' : '')]),
               UI.h('div', { class: 'li-main' }, [
                 UI.h('b', { text: 'API ulanish' }),
                 UI.h('span', { text: 'Tekshirish uchun bosing' }),
@@ -3071,7 +3112,7 @@
                   },
                 },
                 [
-                  UI.h('div', { class: 'li-icon', text: '🛠️' }),
+                  UI.h('div', { class: 'li-icon' }, [UI.icon('badge-check', 'ico-pop')]),
                   UI.h('div', { class: 'li-main' }, [
                     UI.h('b', { text: 'Admin vositalari' }),
                     UI.h('span', { text: 'Bildirishnomalar va jurnallar' }),

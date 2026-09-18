@@ -288,9 +288,11 @@ function injectHomeSearch(view: HTMLElement) {
   const hero = view.querySelector('.hero');
   const seg = view.querySelector('.segmented');
   if (!hero || !seg) return;
-  const searchRow = UI.h('div', { class: 'search-row' }, [
+  const searchRow = UI.h('div', { class: 'search-row', style: 'position:relative' }, [
+    UI.icon('search', ''),
     UI.h('input', {
       class: 'search-input',
+      style: 'padding-left:38px',
       placeholder: "ID, aktiv, holat bo'yicha qidirish…",
       oninput(e: any) {
         (window as any).App.state.searchQuery = e.target.value.toLowerCase().trim();
@@ -300,6 +302,14 @@ function injectHomeSearch(view: HTMLElement) {
       },
     }),
   ]) as HTMLElement;
+  // Search glyph sits inside the input (left).
+  try {
+    const glyph = searchRow.querySelector('.ico') as HTMLElement | null;
+    if (glyph) {
+      glyph.style.cssText +=
+        ';position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.55;pointer-events:none';
+    }
+  } catch {}
   seg.parentNode!.insertBefore(searchRow, seg.nextSibling);
 }
 
@@ -474,13 +484,15 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       UI.toast(doneText, 'ok');
     } catch {}
     const doneBar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
-      UI.h('div', {
-        class: 'small',
-        text:
-          st === 'RELEASED'
-            ? '✅ Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
-            : '↩️ Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
-      }),
+      UI.h('div', { class: 'small', style: 'display:flex;align-items:center;gap:8px' }, [
+        UI.icon(st === 'RELEASED' ? 'party-popper' : 'circle-check-big', 'ico-pop'),
+        UI.h('span', {
+          text:
+            st === 'RELEASED'
+              ? 'Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
+              : 'Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
+        }),
+      ]),
     ]);
     try {
       anchor.parentNode!.insertBefore(doneBar, anchor.nextSibling);
@@ -584,7 +596,10 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       });
       row.appendChild(fillBtn);
     } catch {}
-    const shipBtn = UI.h('button', { class: 'btn btn-primary', text: '📦 Yetkazdim' }) as HTMLButtonElement;
+    const shipBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('badge-check', 'ico-pop'),
+      ' Yetkazdim',
+    ]) as HTMLButtonElement;
     const hint = UI.h('div', {
       class: 'field-hint',
       style: 'text-align:center',
@@ -631,11 +646,14 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       ]),
     );
     const btnRow = UI.h('div', { style: 'display:flex;gap:10px' }) as HTMLElement;
-    const yesBtn = UI.h('button', {
-      class: 'btn btn-primary',
-      text: '✅ Oldim — pulni chiqarish',
-    }) as HTMLButtonElement;
-    const noBtn = UI.h('button', { class: 'btn btn-ghost', text: '❌ Hali emas (chatni ochish)' }) as HTMLButtonElement;
+    const yesBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('circle-check-big', 'ico-pop'),
+      ' Oldim — pulni chiqarish',
+    ]) as HTMLButtonElement;
+    const noBtn = UI.h('button', { class: 'btn btn-ghost' }, [
+      UI.icon('message-circle', 'ico-wiggle'),
+      ' Hali emas (chatni ochish)',
+    ]) as HTMLButtonElement;
     btnRow.appendChild(yesBtn);
     btnRow.appendChild(noBtn);
     const hint = UI.h('div', {
@@ -925,10 +943,10 @@ async function renderChannelEscrow(
         saveBtn.removeAttribute('disabled');
       }
     });
-    const payoutBtn = UI.h('button', {
-      class: 'btn btn-primary',
-      text: "💸 To'lovni so'rash (komissiya chegiriladi)",
-    }) as HTMLButtonElement;
+    const payoutBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('clock', ''),
+      " To'lovni so'rash (komissiya chegiriladi)",
+    ]) as HTMLButtonElement;
     payoutBtn.addEventListener('click', async () => {
       const v = input.value.trim();
       payoutBtn.setAttribute('disabled', '');
@@ -1011,10 +1029,10 @@ async function renderChannelEscrow(
           UI.h('div', { class: 'small', text: `Yangi ega: ${already} — O'tkazish ni bosing.` }),
         ]),
       );
-      const goBtn = UI.h('button', {
-        class: 'btn btn-primary',
-        text: `🚀 ${chan} ni ${already} ga o'tkazish`,
-      }) as HTMLButtonElement;
+      const goBtn = UI.h('button', { class: 'btn btn-primary' }, [
+        UI.icon('key', 'ico-tap'),
+        ` ${chan} ni ${already} ga o'tkazish`,
+      ]) as HTMLButtonElement;
       goBtn.addEventListener('click', async () => {
         goBtn.setAttribute('disabled', '');
         const o = goBtn.textContent!;
@@ -1523,9 +1541,12 @@ function viewChannels() {
   const root = UI.h('div', {}, [
     UI.h('div', { class: 'hero' }, [
       UI.h('h1', { text: 'Kanallar studiyasi' }),
-      UI.h('p', {
-        text: "Kanallar va guruhlarni egallash — shifrlangan ubot orqali admin qilish, taklif qilish, egalikni o'tkazish.",
-      }),
+      UI.h('p', { style: 'display:flex;align-items:center;gap:8px' }, [
+        UI.icon('lock-keyhole', ''),
+        UI.h('span', {
+          text: "Kanallar va guruhlarni egallash — shifrlangan ubot orqali admin qilish, taklif qilish, egalikni o'tkazish.",
+        }),
+      ]),
     ]),
     UI.h('div', { class: 'card' }, [
       UI.h('label', { text: 'Kanal / Guruh' }),

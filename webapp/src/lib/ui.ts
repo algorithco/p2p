@@ -1,4 +1,5 @@
 import { prefersReducedMotion } from './motion';
+import { icon, iconLabel, iconNames } from './icons';
 
 export function h(tag: string, attrs: Record<string, any> | null, children?: any): HTMLElement {
   const el = document.createElement(tag);
@@ -435,6 +436,9 @@ export const UI = {
   toast,
   errToast,
   friendlyError,
+  icon,
+  iconLabel,
+  iconNames,
   copy,
   skeletonDeals,
   sheetOpen,

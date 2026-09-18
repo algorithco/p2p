@@ -18,6 +18,7 @@
   "dependencies": {
     "@types/canvas-confetti": "^1.9.0",
     "canvas-confetti": "^1.9.4",
+    "lucide": "^1.47.0",
     "motion": "^13.3.0"
   },
   "overrides": {
