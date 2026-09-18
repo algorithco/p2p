@@ -838,7 +838,8 @@ async function resolveRequesterPhotoFileId(telegramId: number): Promise<string |
   }
 }
 
-// Per-deal E2E chat key — only buyer, seller or admin may fetch (ciphertext never leaves client decrypted on server)
+// Per-deal chat key — P4-14: NOT true E2E against operator. Encrypted at rest, operator-accessible for moderation/dispute.
+// Only buyer/seller or admin (ADMIN_API_KEY or verified admin id) may fetch; generic service api-key NOT allowed.
 app.get(
   '/api/deals/:id/key',
   requireIdentity,
