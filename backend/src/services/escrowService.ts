@@ -32,18 +32,35 @@ async function notifyAdminsHub(memo: string, amount = '', asset = ''): Promise<v
 }
 
 /**
+ * Minimal deal shape needed by the payout path (avoids `any` on money code).
+ * Mirrors the deals table columns read here; extra columns are ignored.
+ */
+export interface PayoutDealRow {
+  id: number | string;
+  amount: string | number | null;
+  asset: string | null;
+  terms?: string | null;
+  fee_bps?: number | string | null;
+  payout_address?: string | null;
+  buyer_telegram_id?: number | string | null;
+  seller_telegram_id?: number | string | null;
+  status?: string | null;
+  payout_idempotency_key?: string | null;
+}
+
+/**
  * Resolve payout destination TON address for a deal.
  * Priority: explicit opts.toAddress > per-deal payout_address > users.ton_address (seller/buyer) > DB fallback.
  * Returns null if none found — caller must throw seller_ton_address_required.
  */
-async function resolvePayoutAddress(
-  deal: any,
+export async function resolvePayoutAddress(
+  deal: PayoutDealRow,
   optsToAddress: string | undefined,
   targetTelegramId: number | null,
 ): Promise<string | null> {
   const toAddress = (optsToAddress || '').trim();
   if (toAddress) return toAddress;
-  const payoutAddr = (deal as any).payout_address as string | undefined;
+  const payoutAddr = deal.payout_address as string | undefined;
   if (payoutAddr && payoutAddr.trim()) return payoutAddr.trim();
   if (targetTelegramId != null) {
     // Fallback lookups: a transient DB error here must stay visible — swallowing it
@@ -269,7 +286,10 @@ export async function reconcileStuckPayouts(stuckAfterMinutes = 15): Promise<num
         idempotencyKey: String(r.payout_idempotency_key ?? ''),
         attemptedAt: String(r.payout_attempted_at ?? ''),
       });
-    } catch {} // best-effort: hub notify below is the backstop; alert-table write must not throw.
+    } catch (alertErr) {
+      // P3: stuck-payout flag already goes to hub below; log alert-table failure with deal id.
+      logger.warn(`payout_stuck alert save failed for deal #${r.id}`, alertErr);
+    }
     await notifyAdminsHub(text, String(r.amount ?? ''), String(r.asset ?? ''));
   }
   if (rows.length) logger.warn(`reconcileStuckPayouts: flagged ${rows.length} stuck payout(s) for manual review`);
@@ -280,7 +300,7 @@ export async function reconcileStuckPayouts(stuckAfterMinutes = 15): Promise<num
  * P1-6: escalating re-alerts for stuck payouts — re-notify every escalationHours while still stuck.
  * Exposed via scheduler and admin endpoint so stuck deals cannot be missed.
  */
- 
+
 export async function reconcileStuckWithEscalation(_escalationHours = 6): Promise<number> {
   // Reuse same query but with shorter cutoff to allow re-alert; deduplicate by time since last alert?
   // For simplicity, we re-run reconcileStuckPayouts with a tighter window and tag as escalation.
@@ -515,7 +535,11 @@ export async function guardedTransition(
     let feeBase = 0n;
     if (isRelease) {
       try {
-        const parts = feeParts(amountStr, assetUpper, (deal as any).fee_bps ?? config.feeBps ?? 100);
+        const parts = feeParts(
+          amountStr,
+          assetUpper,
+          (deal as PayoutDealRow | undefined)?.fee_bps ?? config.feeBps ?? 100,
+        );
         payoutHuman = parts.sellerHuman;
         feeHuman = parts.feeHuman;
         feeBase = parts.feeBase;
@@ -530,7 +554,11 @@ export async function guardedTransition(
       // feeBase deliberately stays 0: the fee portion returns inside the
       // principal — no separate fee leg to feeAddress may fire on a refund.
       try {
-        const pricing = dealPricing(amountStr, assetUpper, (deal as any).fee_bps ?? config.feeBps ?? 100);
+        const pricing = dealPricing(
+          amountStr,
+          assetUpper,
+          (deal as PayoutDealRow | undefined)?.fee_bps ?? config.feeBps ?? 100,
+        );
         payoutHuman = fromBaseUnits(pricing.expectedDeposit, assetUpper);
         if (payoutHuman === '0' || payoutHuman === '-0') payoutHuman = amountStr;
       } catch (e) {
@@ -621,7 +649,10 @@ export async function guardedTransition(
         `Deal #${dealId} ${status} failed: ${msg} — amount ${plan!.principalHuman} to ${plan!.toAddress} (key ${idemKey}). ON-CHAIN TEKSHIRING: transfer executed bo'lishi mumkin; qayta yuborishdan oldin tekshiring.`,
         { dealId, status, error: msg, to: plan!.toAddress, amount: plan!.principalHuman, idempotencyKey: idemKey },
       );
-    } catch {}
+    } catch (alertErr) {
+      // P3: never swallow alert persistence silently — hub notify below is the backstop.
+      logger.warn(`payout_failed alert save failed for deal #${dealId} (key ${idemKey})`, alertErr);
+    }
     if (isRelease) {
       logger.warn(`Payout failed for deal #${dealId} — not marking ${status}, manual required: ${msg}`, e);
       await notifyAdminsHub(
@@ -654,7 +685,10 @@ export async function guardedTransition(
         to: plan!.toAddress,
         amount: plan!.principalHuman,
       });
-    } catch {}
+    } catch (alertErr) {
+      // P3: finalize conflict already logged as error above; this guards the alert-table write.
+      logger.warn(`payout_finalize_conflict alert save failed for deal #${dealId} (key ${idemKey})`, alertErr);
+    }
     await notifyAdminsHub(text, plan!.principalHuman, plan!.assetUpper);
     throw new Error(`concurrent_transition: payout sent but deal status changed during send (key ${idemKey})`);
   }
@@ -690,18 +724,24 @@ export async function adminRelease(adminTelegramId: number | string, dealId: num
     try {
       if (deal?.buyer_telegram_id != null)
         await notify.adminDecisionToParty(Number(deal.buyer_telegram_id), like, partyText);
-    } catch {}
+    } catch (notifyErr) {
+      logger.warn(`adminRelease buyer notify failed for deal #${id}`, notifyErr);
+    }
     try {
       if (deal?.seller_telegram_id != null)
         await notify.adminDecisionToParty(Number(deal.seller_telegram_id), like, partyText);
-    } catch {}
+    } catch (notifyErr) {
+      logger.warn(`adminRelease seller notify failed for deal #${id}`, notifyErr);
+    }
     try {
       const { saveAdminAlert } = await import('../db/queries');
       await saveAdminAlert('admin_release', `Deal #${id} admin tomonidan chiqarildi`, {
         dealId: id,
         by: Number(adminTelegramId),
       });
-    } catch {}
+    } catch (alertErr) {
+      logger.warn(`admin_release alert save failed for deal #${id}`, alertErr);
+    }
     await notifyAdminsHub(
       `Deal #${id} admin tomonidan chiqarildi (${adminTelegramId})`,
       String(deal?.amount ?? ''),
@@ -734,18 +774,24 @@ export async function adminRefund(adminTelegramId: number | string, dealId: numb
     try {
       if (deal?.buyer_telegram_id != null)
         await notify.adminDecisionToParty(Number(deal.buyer_telegram_id), like, partyText);
-    } catch {}
+    } catch (notifyErr) {
+      logger.warn(`adminRefund buyer notify failed for deal #${id}`, notifyErr);
+    }
     try {
       if (deal?.seller_telegram_id != null)
         await notify.adminDecisionToParty(Number(deal.seller_telegram_id), like, partyText);
-    } catch {}
+    } catch (notifyErr) {
+      logger.warn(`adminRefund seller notify failed for deal #${id}`, notifyErr);
+    }
     try {
       const { saveAdminAlert } = await import('../db/queries');
       await saveAdminAlert('admin_refund', `Deal #${id} admin tomonidan qaytarildi`, {
         dealId: id,
         by: Number(adminTelegramId),
       });
-    } catch {}
+    } catch (alertErr) {
+      logger.warn(`admin_refund alert save failed for deal #${id}`, alertErr);
+    }
     await notifyAdminsHub(
       `Deal #${id} admin tomonidan qaytarildi (${adminTelegramId})`,
       String(deal?.amount ?? ''),
@@ -864,15 +910,15 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
         message: `Deal #${id} "${deal.status}" holatda — to'lov allaqachon jarayonda. Takrorlamang; admin on-chain tekshirsin.`,
       };
     }
-    const allowed = [DEAL_STATUS.ITEM_SENT];
-    if (!allowed.includes(deal.status as any)) {
+    const allowed: string[] = [DEAL_STATUS.ITEM_SENT];
+    if (!allowed.includes(String(deal.status))) {
       if (deal.status === DEAL_STATUS.DEPOSIT_CONFIRMED) {
         await client.query('ROLLBACK');
         return {
           success: false,
           message: `Deal #${id} "DEPOSIT_CONFIRMED" holatda — avval sotuvchi "Yetkazdim" ni bosishi shart, keyin chiqarish mumkin.`,
           needItemSent: true,
-        } as any;
+        };
       }
       if (deal.status === DEAL_STATUS.BUYER_CONFIRMED) {
         logger.warn(`buyerApproveReceipt legacy BUYER_CONFIRMED for deal #${id}`);
@@ -906,7 +952,11 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
     let feeHuman = '0';
     let feeBase = 0n;
     try {
-      const parts = feeParts(amountStr, assetUpper, (deal as any).fee_bps ?? config.feeBps ?? 100);
+      const parts = feeParts(
+        amountStr,
+        assetUpper,
+        (deal as PayoutDealRow | undefined)?.fee_bps ?? config.feeBps ?? 100,
+      );
       sellerHuman = parts.sellerHuman;
       feeHuman = parts.feeHuman;
       feeBase = parts.feeBase;
@@ -931,7 +981,9 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
             `To'lov manzilingizni kiriting (Deal #${id})`,
           );
         }
-      } catch {}
+      } catch (notifyErr) {
+        logger.warn(`buyerApproveReceipt seller notify failed for deal #${id}`, notifyErr);
+      }
       try {
         const { addDealMessage } = await import('./dealService');
         await addDealMessage(
@@ -939,9 +991,11 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
           0,
           `Tizim: Xaridor qabul qildi (Deal #${id}), lekin sotuvchi to'lov manzili yo'q — sotuvchi ilovada manzilni kiriting.`,
         );
-      } catch {}
+      } catch (msgErr) {
+        logger.warn(`buyerApproveReceipt system message failed for deal #${id}`, msgErr);
+      }
       logger.warn(`buyerApproveReceipt #${id}: missing payout address`);
-      return { success: false, message: msg, needSellerAddress: true } as any;
+      return { success: false, message: msg, needSellerAddress: true };
     }
 
     const memoPlainBase = releaseComment({ id, amount: amountStr, asset: assetUpper, terms: String(deal.terms || '') });
@@ -1008,7 +1062,9 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
         `Deal #${id} buyer-approve payout failed: ${msg} — ${plan!.principalHuman} to ${plan!.toAddress} (key ${idemKey}). ON-CHAIN TEKSHIRING: qayta yuborishdan oldin tekshiring.`,
         { dealId: id, error: msg, to: plan!.toAddress, amount: plan!.principalHuman, idempotencyKey: idemKey },
       );
-    } catch {}
+    } catch (alertErr) {
+      logger.warn(`buyer-approve payout_failed alert save failed for deal #${id} (key ${idemKey})`, alertErr);
+    }
     await notifyAdminsHub(
       `Deal #${id} to'lov xatosi: ${msg} — ${plan!.principalHuman} manzil ${plan!.toAddress}.`,
       plan!.principalHuman,
@@ -1037,7 +1093,9 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
         to: plan!.toAddress,
         amount: plan!.principalHuman,
       });
-    } catch {}
+    } catch (alertErr) {
+      logger.warn(`buyer-approve finalize_conflict alert save failed for deal #${id} (key ${idemKey})`, alertErr);
+    }
     await notifyAdminsHub(text, plan!.principalHuman, plan!.assetUpper);
     return {
       success: false,
@@ -1097,28 +1155,38 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
 const ESCROW_HOLDER_USERNAME = process.env.ESCROW_HOLDER_USERNAME || '@gramchioka';
 const ESCROW_HOLDER_ID = Number(process.env.ESCROW_HOLDER_ID || 8992814642);
 
-function isChannelDeal(deal: any): boolean {
+function isChannelDeal(deal: PayoutDealRow & Record<string, unknown>): boolean {
   const t = String(deal?.deal_type || deal?.dealType || 'P2P').toUpperCase();
   return t === 'CHANNEL' || t === 'GROUP';
 }
 
-async function ubotFetch(path: string, init?: RequestInit): Promise<any> {
-  const base = (config as any).ubotUrl || process.env.UBOT_URL || 'http://ubot:3002';
-  const key = (config as any).ubotApiKey || process.env.UBOT_API_KEY || '';
+interface UbotError extends Error {
+  status?: number;
+  body?: unknown;
+  retryAfter?: unknown;
+}
+
+async function ubotFetch(path: string, init?: RequestInit): Promise<unknown> {
+  const base = config.ubotUrl || process.env.UBOT_URL || 'http://ubot:3002';
+  const key = config.ubotApiKey || process.env.UBOT_API_KEY || '';
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (key) headers['x-api-key'] = key;
   const url = base.replace(/\/+$/, '') + path;
-  const res = await fetch(url, { ...init, headers: { ...headers, ...((init?.headers as any) || {}) } } as any);
+  const res = await fetch(url, {
+    ...init,
+    headers: { ...headers, ...((init?.headers as Record<string, string>) || {}) },
+  });
   const txt = await res.text();
-  let data: any = txt;
+  let data: unknown = txt;
   try {
     data = txt ? JSON.parse(txt) : null;
   } catch {} // best-effort: non-JSON upstream body surfaces as raw text in the error below.
   if (!res.ok) {
-    const err: any = new Error(data?.error || txt || `ubot ${res.status}`);
+    const err = new Error((data as { error?: string } | null)?.error || txt || `ubot ${res.status}`) as UbotError;
     err.status = res.status;
     err.body = data;
-    if (data?.retryAfter) err.retryAfter = data.retryAfter;
+    const retryAfter = (data as { retryAfter?: unknown } | null)?.retryAfter;
+    if (retryAfter !== undefined) err.retryAfter = retryAfter;
     throw err;
   }
   return data;

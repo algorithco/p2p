@@ -308,7 +308,10 @@ async function unknownToAdminsAndSave(info: {
       address: info.address,
       memo: info.memo,
     });
-  } catch {} // best-effort: Telegram notify above already attempted; alert persistence must not break deposit handling.
+  } catch (alertErr) {
+    // P3: Telegram notify above already attempted; log alert-table failure with memo context.
+    logger.warn(`unknown_deposit alert save failed (${info.amount} ${info.asset} ${info.memo.slice(0, 80)})`, alertErr);
+  }
 }
 
 async function notifySellerDeposit(deal: DealRow) {
