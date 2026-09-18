@@ -1,32 +1,52 @@
-import { Bot, InlineKeyboard } from 'grammy';
+import { Bot, InlineKeyboard, Keyboard } from 'grammy';
 import { config } from '../../config';
 import logger, { sanitizeLogValue } from '../../logger';
 import { getMonthlyBuyerRating } from '../../db/queries';
-import { webAppButton } from '../keyboards';
+import { webAppButton, webAppReplyKeyboard } from '../keyboards';
 
 function welcomeText(): string {
   return [
-    `🛡️ SafeDeal — xavfsiz savdo.`,
-    `Bot pulni tovar topshirilgunga qadar ushlaydi.`,
-    `Hamma ish ilovada bajariladi.`,
-    `Davom etish uchun pastdagi tugmani bosing.`,
+    `🛡️ <b>TonEscrow — xavfsiz P2P savdo</b>`,
+    ``,
+    `Bu bot pulni tovar/xizmat topshirilgunga qadar ushlab turadi. To'lov <b>TON</b> yoki <b>USDT</b> da, to'g'ridan-to'g'ri blokcheynda.`,
+    ``,
+    `<b>Qanday ishlaydi:</b>`,
+    `1️⃣ Bitim yarating — narx, shartlar va muddatni kiriting`,
+    `2️⃣ Xaridor to'lov qiladi — pul escrow hamyonda saqlanadi`,
+    `3️⃣ Sotuvchi “Yubordim” bosadi, xaridor “Qabul qildim” tasdiqlaydi`,
+    `4️⃣ Tasdiqdan keyin pul avtomatik sotuvchiga o'tadi (komissiya 1%). Nizo bo'lsa admin hal qiladi`,
+    ``,
+    `Barcha amallar ilovada — pastdagi <b>🚀 Ilovani ochish</b> tugmasini bosing.`,
+    `Havola orqali taklif qilingan bo'lsangiz, havola avtomatik ochiladi.`,
   ].join('\n');
 }
 
 function helpText(): string {
   return [
-    `📖 Yordam: hamma ish ilovada.`,
-    `Havola orqali qo'shiling va to'lovni ilovada qiling.`,
-    `Muammo bo'lsa admin bilan bog'laning.`,
+    `📖 <b>Yordam</b>`,
+    ``,
+    `• Bitim yarating → havola ulashing → sherik qo'shilsin`,
+    `• To'lovni faqat ilovada qiling — izoh (memo) avtomatik shifrlanadi`,
+    `• “Yubordim” / “Qabul qildim” tugmalari bilan yakunlang`,
+    `• Muammo bo'lsa /disputes (admin) yoki pastdagi Reyting tugmasi`,
+    ``,
+    `Ilovani pastdagi tugma orqali oching.`,
   ].join('\n');
 }
 
-function welcomeKeyboard(): InlineKeyboard {
+function welcomeInlineKeyboard(): InlineKeyboard {
   const base = (config.webappUrl || '').replace(/\/$/, '');
   if (base) {
-    return webAppButton(base, 'Ilovani ochish').row().text('Yordam', 'help');
+    return webAppButton(base, '🚀 Ilovani ochish').row().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
   }
-  return new InlineKeyboard().text('Yordam', 'help');
+  return new InlineKeyboard().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
+}
+
+function welcomeReplyKeyboard(): Keyboard {
+  const base = (config.webappUrl || '').replace(/\/$/, '');
+  // Persistent bottom keyboard — Telegram shows this as a fixed bar under the chat input.
+  // webApp button here opens the Mini App directly (same URL as the menu button).
+  return webAppReplyKeyboard(base || '', '🚀 Ilovani ochish');
 }
 
 export function registerCommands(bot: Bot) {
@@ -85,16 +105,29 @@ export function registerCommands(bot: Bot) {
       // Join payload handled — don't pile the generic welcome on top of it.
       if (handled) return;
     }
-    await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+    // Ordinary /start: rich info + persistent bottom keyboard (web_app) so the
+    // Mini App is one tap away. Inline keyboard stays for in-message actions.
+    await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
+    // Bottom bar — persists under the input field (Keyboard with web_app).
+    // Sent as a follow-up with the same text hidden? No — separate keyboard message
+    // so it doesn't replace the inline buttons. Telegram allows one markup per
+    // message, so we set the persistent Keyboard via a second reply.
+    try {
+      await ctx.reply('Pastdagi tugma orqali ilovani istalgan vaqtda oching 👇', {
+        reply_markup: welcomeReplyKeyboard(),
+      });
+    } catch (e) {
+      logger.warn('welcome reply keyboard failed', e);
+    }
   });
 
   bot.callbackQuery('menu:home', async (ctx) => {
     await ctx.answerCallbackQuery();
     try {
-      await ctx.editMessageText(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+      await ctx.editMessageText(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
     } catch {
       // best-effort: edit fails when the message is unchanged/deleted — reply instead.
-      await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+      await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
     }
   });
 
@@ -111,8 +144,39 @@ export function registerCommands(bot: Bot) {
   };
 
   bot.callbackQuery('help', async (ctx) => showHelp(ctx));
+  bot.callbackQuery('help:rating', async (ctx) => {
+    try {
+      await ctx.answerCallbackQuery();
+    } catch {}
+    try {
+      const [ton, usdt] = await Promise.all([
+        getMonthlyBuyerRatingSafe('TON', 5),
+        getMonthlyBuyerRatingSafe('USDT', 5),
+      ]);
+      await ctx.reply(formatRating(ton, usdt), { parse_mode: 'HTML' });
+    } catch (e) {
+      logger.warn('/reyting inline failed', e);
+      await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.');
+    }
+  });
+  // Reply-keyboard fallbacks — user tapped the persistent bottom bar
+  bot.hears('📖 Yordam', async (ctx) => {
+    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
+  });
+  bot.hears('🏆 Reyting', async (ctx) => {
+    try {
+      const [ton, usdt] = await Promise.all([
+        getMonthlyBuyerRatingSafe('TON', 5),
+        getMonthlyBuyerRatingSafe('USDT', 5),
+      ]);
+      await ctx.reply(formatRating(ton, usdt), { parse_mode: 'HTML' });
+    } catch (e) {
+      logger.warn('/reyting hears failed', e);
+      await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.');
+    }
+  });
   bot.command('help', async (ctx) => {
-    await ctx.reply(helpText(), { parse_mode: 'HTML' });
+    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
   });
 
   // Monthly buyer rating — completed (RELEASED) deals only; only the buyer
