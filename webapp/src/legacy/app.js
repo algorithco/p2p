@@ -607,135 +607,6 @@
 
   /* ================= Wallet ================= */
 
-  function walletConnectSheet() {
-    var content = UI.h('div', {}, [
-      UI.h('div', { class: 'sheet-grabber' }),
-      UI.h('h3', { text: 'Hamyonni ulash' }),
-      UI.h('p', {
-        class: 'sub',
-        text: 'TON hamyoningizni tanlang. Kalitlar faqat sizning qurilmangizda qoladi — non-custodial.',
-      }),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt selected',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-tk', text: '◈' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: 'Tonkeeper' }),
-            UI.h('div', { class: 'small muted', text: 'Eng mashhur · tavsiya qilinadi' }),
-          ]),
-          UI.h('span', { style: 'color:#3B82F6;font-weight:800', text: '✓' }),
-        ],
-      ),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-mt', text: '◎' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: 'MyTonWallet' }),
-            UI.h('div', { class: 'small muted', text: 'Open-source' }),
-          ]),
-          UI.h('span', { class: 'small muted', text: '→' }),
-        ],
-      ),
-      UI.h(
-        'button',
-        {
-          class: 'wallet-opt',
-          onclick: function () {
-            TG.haptic.tap();
-            Wallet.connect().catch(function () {
-              UI.toast('Hamyon ulanmadi', 'err');
-            });
-            UI.sheetClose();
-          },
-        },
-        [
-          UI.h('div', { class: 'w-icon w-w', text: '₮' }),
-          UI.h('div', { style: 'flex:1;text-align:left' }, [
-            UI.h('div', { style: 'font-weight:800;font-size:14px', text: '@wallet in Telegram' }),
-            UI.h('div', { class: 'small muted', text: 'Ilova ichida · kengaytmasiz' }),
-          ]),
-          UI.h('span', { class: 'small muted', text: '→' }),
-        ],
-      ),
-      UI.h('button', {
-        class: 'btn btn-primary',
-        style: 'margin-top:8px',
-        onclick: function () {
-          TG.haptic.medium();
-          Wallet.connect().catch(function () {
-            UI.toast('Hamyon ulanmadi', 'err');
-          });
-          UI.sheetClose();
-        },
-        text: 'Tonkeeper bilan davom etish',
-      }),
-      UI.h('div', { style: 'text-align:center;margin-top:10px' }, [
-        UI.h('button', {
-          class: 'link-btn',
-          onclick: function () {
-            UI.sheetClose();
-          },
-          text: 'Keyinroq',
-        }),
-      ]),
-      UI.h(
-        'div',
-        {
-          style:
-            'margin-top:14px;padding:10px;border-radius:12px;background:var(--success-soft);border:1px solid rgba(52,211,153,.22);display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:700',
-        },
-        [
-          UI.h('span', {
-            style:
-              'width:8px;height:8px;border-radius:50%;background:var(--success);box-shadow:0 0 0 6px var(--success-soft);display:inline-block',
-          }),
-          UI.h('span', { text: 'Audited escrow · non-custodial' }),
-          UI.h('span', {
-            style:
-              'margin-left:auto;font-size:11px;font-weight:800;padding:4px 8px;border-radius:999px;background:#0B0E14;color:var(--success);border:1px solid rgba(52,211,153,.3)',
-            text: 'TON',
-          }),
-        ],
-      ),
-    ]);
-    // Build sheet manually to avoid double grabber
-    var root = document.getElementById('sheet-root');
-    root.innerHTML = '';
-    var backdrop = UI.h('div', {
-      class: 'sheet-backdrop',
-      onclick: function () {
-        UI.sheetClose();
-      },
-    });
-    var sheet = UI.h('div', { class: 'sheet', role: 'dialog', html: '' });
-    sheet.appendChild(content);
-    // remove extra grabber dup (content already has one)
-    root.appendChild(backdrop);
-    root.appendChild(sheet);
-    root.classList.add('open');
-  }
-
   function walletPill() {
     var balEl = UI.h('span', { class: 'wallet-bal small muted', style: 'margin-left:8px', text: '' });
     var btn = UI.h(
@@ -748,8 +619,15 @@
             UI.toast('Hamyon SDK yuklanmoqda…');
             return;
           }
-          if (Wallet.connected()) walletSheet();
-          else walletConnectSheet();
+          if (Wallet.connected()) {
+            walletSheet();
+            return;
+          }
+          // Native TON Connect modal (wallet chooser) — no custom picker sheet.
+          Wallet.connect().catch(function (err) {
+            console.warn('[App] wallet connect failed', err);
+            UI.toast('Hamyon ulanmadi', 'err');
+          });
         },
       },
       ['🔌 Hamyonni ulash'],

@@ -1805,50 +1805,6 @@ img.avatar {
   border-color: var(--success);
   color: var(--success);
 }
-/* wallet sheet options (premium) */
-.wallet-opt {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  margin-bottom: 8px;
-  cursor: pointer;
-  transition: 0.15s;
-  width: 100%;
-  text-align: left;
-}
-.wallet-opt:active {
-  transform: scale(0.98);
-  border-color: rgba(59, 130, 246, 0.35);
-}
-.wallet-opt.selected {
-  border-color: var(--accent);
-  background: rgba(59, 130, 246, 0.1);
-}
-.w-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  font-size: 18px;
-  font-weight: 800;
-  color: #fff;
-  flex-shrink: 0;
-}
-.w-tk {
-  background: radial-gradient(circle at 30% 25%, #38bdf8, #0ea5e9);
-}
-.w-mt {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-}
-.w-w {
-  background: linear-gradient(135deg, #0ea5e9, #2563eb);
-}
-
 @media (min-width: 480px) {
   body {
     font-size: 15.5px;

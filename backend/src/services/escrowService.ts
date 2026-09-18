@@ -1573,7 +1573,13 @@ export async function payoutSellerForChannel(
         ? custody.error
         : `current creator ${custody.currentCreatorId} != escrow ${ESCROW_HOLDER_ID}`;
       const msg = `escrow_custody_lost: ${detail} — seller must re-transfer the channel to ${ESCROW_HOLDER_USERNAME} before payout`;
-      logger.warn(`payoutSellerForChannel deal #${dealId}: ${msg}`);
+      // NOTE: log only non-env-derived parts — CodeQL clear-text-logging flags
+      // process.env-derived values (holder username/id) at log sinks, even
+      // though this one is a public @username. Full detail goes to the admin
+      // alert + API error below (not log sinks).
+      logger.warn(
+        `payoutSellerForChannel deal #${dealId}: escrow custody lost (current creator ${custody.currentCreatorId ?? 'unknown'}) — seller must re-transfer before payout`,
+      );
       try {
         const { saveAdminAlert } = await import('../db/queries');
         await saveAdminAlert('escrow_custody_lost', `Deal #${dealId}: ${msg}`, {
