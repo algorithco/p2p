@@ -55,6 +55,9 @@ services:
     restart: unless-stopped
     env_file:
       - signer/.env
+    environment:
+      # Durable idempotency: same shared Postgres (memory-only fallback if unset).
+      DATABASE_URL: postgres://escrow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/escrow
     expose:
       - '3001'
     # Uncomment to debug signer externally:
