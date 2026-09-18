@@ -112,8 +112,12 @@ services:
       UTRADE_URL: http://utradebot:3003
       SERVE_STATIC: 'false'
       # WEBAPP_URL / FRONTEND_URL come from backend/.env (env_file) — set to https://<cloudflare> for TON Connect + bot
+    # Loopback-only host publish: :3000 is commonly taken by other stacks on
+    # this host (algorith-voice). Matches the header comment (host :3005) and
+    # the previous live deployment (127.0.0.1:3005->3000). A plain '3000:3000'
+    # here took the whole backend down on the last rebuild (bind conflict).
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3005:3000'
     depends_on:
       postgres:
         condition: service_healthy
