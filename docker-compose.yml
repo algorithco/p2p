@@ -53,6 +53,8 @@ services:
       context: .
       dockerfile: signer/Dockerfile
     restart: unless-stopped
+    # Graceful drain for in-flight signing ops (signer waits up to ~25s on SIGTERM).
+    stop_grace_period: 30s
     env_file:
       - signer/.env
     environment:
@@ -75,8 +77,14 @@ services:
       timeout: 3s
       retries: 5
       start_period: 20s
+    # LIVE DEPLOYMENT DRIFT WARNING (2026-09-18 incident): the running stack
+    # uses `escrow-internal` (backend+postgres+signer), NOT the `escrow-net`
+    # this file declares below. A rebuild with `escrow-net` here silently
+    # detached signer from backend+postgres and broke ALL payouts until
+    # manually re-attached. Keep signer on escrow-internal (external: true —
+    # the live stack owns that network) until the whole file is migrated.
     networks:
-      - escrow-net
+      - escrow-internal
     logging:
       driver: json-file
       options:
@@ -306,3 +314,8 @@ networks:
   escrow-net:
     driver: bridge
     name: escrow-net
+  # Live stack network (see signer warning above). External: managed outside
+  # this file revision — do not let compose recreate it.
+  escrow-internal:
+    external: true
+    name: escrow-internal

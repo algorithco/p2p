@@ -1,5 +1,5 @@
 import { Api } from 'teleproto';
-import { ensureClient, withFloodWait } from './client';
+import { ensureClient, getClient, withFloodWait } from './client';
 import logger, { sanitizeLogValue } from './logger';
 import {
   promoteToAdmin,
@@ -182,8 +182,10 @@ export async function promoteGroupAdmin(
   rank = 'Admin',
 ): Promise<void> {
   if (!userId) throw new Error('userId required');
+  // ensureSupergroup already ensures the (lazy) connection — reuse it, no second auth check.
   const supergroup = await ensureSupergroup(groupId);
-  const client = await ensureClient();
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let userEntity: unknown;
   try {
     userEntity = await cachedGetEntity(
@@ -207,8 +209,10 @@ export async function transferGroupOwnership(
   password?: string,
 ): Promise<void> {
   if (!newOwnerId) throw new Error('newOwnerId required');
+  // ensureSupergroup already ensures the (lazy) connection — reuse it.
   const supergroup = await ensureSupergroup(groupId);
-  const client = await ensureClient();
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let newOwnerEntity: unknown;
   try {
     newOwnerEntity = await cachedGetEntity(
@@ -223,8 +227,10 @@ export async function transferGroupOwnership(
 
 export async function demoteGroupAdmin(groupId: string | number, userId: string | number): Promise<void> {
   if (!userId) throw new Error('userId required');
+  // ensureSupergroup already ensures the (lazy) connection — reuse it.
   const supergroup = await ensureSupergroup(groupId);
-  const client = await ensureClient();
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let userEntity: unknown;
   try {
     userEntity = await cachedGetEntity(
@@ -239,8 +245,10 @@ export async function demoteGroupAdmin(groupId: string | number, userId: string 
 
 export async function addGroupMember(groupId: string | number, userId: string | number): Promise<void> {
   if (!userId) throw new Error('userId required');
-  const client = await ensureClient();
+  // ensureSupergroup ensures the (lazy) connection itself — reuse it, no separate auth check.
   const group = await ensureSupergroup(groupId);
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let user: unknown;
   try {
     user = await cachedGetEntity(client as unknown as { getEntity: (id: string) => Promise<unknown> }, String(userId));
