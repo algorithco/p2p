@@ -19,7 +19,29 @@ npm run deploy # deploy W5 wallet (fund address first)
 npm run send -- <to> <valueTON> [comment]
 ```
 
-`.env` options: see `.env.example` (`SIGNER_MNEMONIC`, `SIGNER_API_KEY`, `TON_NETWORK`, `TON_API_ENDPOINT`, `TONCENTER_API_KEY`, `PORT`, `CORS_ORIGIN`, `WALLET_WORKCHAIN`).
+`.env` options: see `.env.example` (`SIGNER_MNEMONIC`, `SIGNER_API_KEY`, `TON_NETWORK`, `TON_API_ENDPOINT`, `TONCENTER_API_KEY`, `PORT`, `CORS_ORIGIN`, `WALLET_WORKCHAIN`, `MAX_SEND_TON`).
+
+## Safety behavior
+
+- **Serialized sends**: all signing ops run under a mutex — a W5 wallet uses one
+  seqno per transfer, so concurrent sends would read the same seqno and one
+  would die on-chain ambiguously. The lock also closes the idempotency
+  check→send→store race for identical keys.
+- **Idempotency**: `x-idempotency-key` (header or `idempotencyKey` body) on
+  `/send`, `/send-batch`, `/send-jetton`, `/deploy-escrow`. Same key+params
+  replays `{ok, seqno, duplicate:true}` without re-broadcasting; same key with
+  different params → `409 idempotency_conflict`. Memory LRU (1000 keys, 24h)
+  - Postgres `signer_idempotency` when `DATABASE_URL` is set.
+- **Error codes**: `400` bad input (incl. strict USDT `^\d+(\.\d{1,6})?$` amount
+  check), `402` insufficient balance, `409` conflict/already-deployed, `429`
+  FloodWait (with `Retry-After`), `502` TON-network failure (incl.
+  `seqno_fetch_failed` — wallet may be undeployed), `503` no wallet.
+- **Seed checksum**: `SIGNER_MNEMONIC` BIP39 checksum is verified at boot — a
+  typo'd seed refuses to derive (fail-closed, all sends `503`) instead of
+  silently operating the wrong wallet.
+- **Cap**: `MAX_SEND_TON` (unset = unlimited) caps a single transfer.
+- **Shutdown**: SIGTERM/SIGINT drains in-flight sends up to ~25s (needs
+  `stop_grace_period: 30s` in compose, already set).
 
 ## API
 

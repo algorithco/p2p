@@ -69,4 +69,54 @@ describe('P5-15 tryRefundUnderpay', () => {
     const r = await tryRefundUnderpay({ id: 2, asset: 'TON', confirmations: { underpay: { amount: '1', src: '' } } });
     expect(r.refundAttempted).toBe(false);
   });
+
+  it('refunds EVERY history entry with per-tx keys (no last-write-wins)', async () => {
+    const { Address } = await import('@ton/core');
+    const src1 = Address.parse('0:' + '11'.repeat(32)).toString({ urlSafe: true, bounceable: false });
+    const src2 = Address.parse('0:' + '22'.repeat(32)).toString({ urlSafe: true, bounceable: false });
+    const deal = {
+      id: 43,
+      asset: 'TON',
+      confirmations: {
+        underpay_history: [
+          { amount: '0.5', src: src1, tx: 'aaa', refunded: false },
+          { amount: '0.7', src: src2, tx: 'bbb', refunded: false },
+        ],
+      },
+    };
+    const r = await tryRefundUnderpay(deal);
+    expect(r.refundAttempted).toBe(true);
+    expect(r.refundSucceeded).toBe(true);
+    expect(r.hasPendingUnderpay).toBe(false);
+    expect(vi.mocked(sendTon)).toHaveBeenCalledTimes(2);
+    const keys = vi.mocked(sendTon).mock.calls.map((c) => (c[0] as { idempotencyKey: string }).idempotencyKey);
+    expect(keys).toContain('underpay-refund:43:aaa');
+    expect(keys).toContain('underpay-refund:43:bbb');
+  });
+
+  it('backs off after a failed attempt (no 5-min hammering)', async () => {
+    const { Address } = await import('@ton/core');
+    const src = Address.parse('0:' + '33'.repeat(32)).toString({ urlSafe: true, bounceable: false });
+    vi.mocked(sendTon).mockRejectedValueOnce(new Error('signer down'));
+    const deal = {
+      id: 44,
+      asset: 'TON',
+      confirmations: { underpay_history: [{ amount: '0.5', src, tx: 'ccc', refunded: false }] },
+    };
+    const r1 = await tryRefundUnderpay(deal);
+    expect(r1.refundSucceeded).toBe(false);
+    expect(r1.hasPendingUnderpay).toBe(true);
+    vi.mocked(sendTon).mockClear();
+    // Immediate retry (same tick storm) must NOT resend — cooldown is hourly.
+    const r2 = await tryRefundUnderpay({
+      id: 44,
+      asset: 'TON',
+      confirmations: {
+        underpay_history: [{ amount: '0.5', src, tx: 'ccc', refunded: false }],
+        underpay_refund: { attempts: 1, last_at: new Date().toISOString() },
+      },
+    });
+    expect(r2.refundAttempted).toBe(false);
+    expect(vi.mocked(sendTon)).not.toHaveBeenCalled();
+  });
 });

@@ -75,7 +75,9 @@ export const identityAuth: RequestHandler = (req, _res, next) => {
   const initDataHeader = req.headers['x-init-data'];
   if (typeof initDataHeader === 'string' && initDataHeader.length > 0 && config.botToken) {
     const result = validateInitData(initDataHeader, config.botToken);
-    if (result.ok && result.user) {
+    // Defense in depth: only attach positive-int ids. A signed-but-degenerate
+    // user object (id 0/NaN/float) must stay anonymous even if HMAC verifies.
+    if (result.ok && result.user && isValidPositiveInt((result.user as { id?: unknown }).id)) {
       req.user = result.user;
       req.authMode = 'telegram';
       return next();
@@ -125,19 +127,14 @@ export const requireIdentity: RequestHandler = (req, res, next) => {
 };
 
 /**
- * Best-known caller telegram id.
- * Verified req.user.id wins; body.telegramId override only for trusted api-key callers.
+ * Best-known caller telegram id — VERIFIED identity only.
+ * The old body.telegramId override for api-key callers was removed: a shared
+ * static secret must never be able to self-assert an arbitrary Telegram id
+ * (full impersonation of any buyer/seller). Operator tooling authenticates via
+ * ADMIN_API_KEY (adminApiKeyMatches) or a verified Telegram id instead.
  */
 export function getIdentityId(req: Request): number | null {
   if (req.user && isValidPositiveInt(req.user.id)) return req.user.id;
-  if (
-    req.authMode === 'api-key' &&
-    req.body &&
-    typeof req.body === 'object' &&
-    isValidPositiveInt((req.body as Record<string, unknown>).telegramId)
-  ) {
-    return Number((req.body as Record<string, unknown>).telegramId);
-  }
   return null;
 }
 

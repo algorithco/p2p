@@ -65,6 +65,20 @@ export const config = {
     '',
   ),
   warmupEnabled: str(process.env.WARMUP, 'true').toLowerCase() !== 'false',
+  // LAZY MODE (ban-risk reduction): do NOT connect to Telegram at boot and do NOT
+  // poll checkAuthorization on a timer. Connect only on the first real channel/group
+  // request; teleproto keep-alive + on-demand ensureClient keep it alive after that.
+  // Opt back into eager boot with UBOT_PRECONNECT=true (debugging only).
+  preconnect: str(process.env.UBOT_PRECONNECT, 'false').toLowerCase() === 'true',
+  // Background auth poll interval (ms). 0 = OFF (default). Any positive value re-enables
+  // the old periodic checkAuthorized loop — each tick is a Telegram API call, so keep off.
+  authPollMs: num(process.env.UBOT_AUTH_POLL_MS as string | undefined, 0),
+  // Idle auto-disconnect (ms): close the MTProto connection after this long with no
+  // ensured activity. 0 = never (stay connected). disconnect() is local — zero TG calls.
+  idleDisconnectMs: num(process.env.UBOT_IDLE_DISCONNECT_MS as string | undefined, 15 * 60 * 1000),
+  // teleproto TCP keep-alive ping (ms). Was hardcoded 30s — far below the ~5min Docker
+  // NAT idle timeout, so 120s default quarters ping traffic with no drop risk.
+  keepAliveMs: num(process.env.UBOT_KEEPALIVE_MS as string | undefined, 120_000),
 };
 
 // Optional zod schema if zod is available
@@ -177,6 +191,25 @@ export function validateConfig(): string[] {
     }
     if (!Number.isInteger(config.maxTransferPerMin) || config.maxTransferPerMin < 1 || config.maxTransferPerMin > 100) {
       errs.push('MAX_TRANSFER_PER_MIN must be 1-100');
+    }
+    if (
+      !Number.isFinite(config.authPollMs) ||
+      config.authPollMs < 0 ||
+      (config.authPollMs > 0 && config.authPollMs < 30_000) ||
+      config.authPollMs > 3_600_000
+    ) {
+      errs.push('UBOT_AUTH_POLL_MS must be 0 (off) or 30000-3600000 ms');
+    }
+    if (
+      !Number.isFinite(config.idleDisconnectMs) ||
+      config.idleDisconnectMs < 0 ||
+      (config.idleDisconnectMs > 0 && config.idleDisconnectMs < 60_000) ||
+      config.idleDisconnectMs > 86_400_000
+    ) {
+      errs.push('UBOT_IDLE_DISCONNECT_MS must be 0 (never) or 60000-86400000 ms');
+    }
+    if (!Number.isFinite(config.keepAliveMs) || config.keepAliveMs < 30_000 || config.keepAliveMs > 600_000) {
+      errs.push('UBOT_KEEPALIVE_MS must be 30000-600000 ms');
     }
   }
 

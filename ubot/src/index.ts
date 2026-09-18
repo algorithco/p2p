@@ -1,6 +1,6 @@
 import { config, validateConfig } from './config';
 import logger from './logger';
-import { ensureClient, checkAuthorized, setGlobalFloodUntil, limiter } from './client';
+import { ensureClient, getClient, getLastActivityAt, disconnect as disconnectClient, limiter } from './client';
 import { createApi } from './api';
 import { clearKeyCache } from './sessionManager';
 
@@ -35,45 +35,21 @@ async function main() {
     } catch {}
   });
 
-  // Try to connect userbot with backoff that respects FloodWait secs — non-fatal for health/ready
-  let attempts = 0;
-  const maxAttempts = 3;
-  while (attempts < maxAttempts) {
-    attempts++;
+  // LAZY MODE (default): do NOT touch Telegram at boot. The MTProto connection is
+  // established on the first real channel/group request via ensureClient() — every
+  // boot-time connect is checkAuthorization + getMe + iterDialogs warmup that the
+  // account pays for even with zero deals. /health and /ready stay fully local.
+  // Opt back into eager boot (debugging only) with UBOT_PRECONNECT=true.
+  if (config.preconnect) {
     try {
       await ensureClient();
-      logger.info('Userbot initial connection succeeded');
-      break;
+      logger.info('Userbot initial connection succeeded (UBOT_PRECONNECT=true)');
     } catch (e) {
-      const err = e as { message?: string; seconds?: number; errorMessage?: string };
-      const msg = String(err.message || err.errorMessage || e);
-      logger.error(`Failed to ensure Telegram client (attempt ${attempts}/${maxAttempts})`, { error: msg });
-      // Parse FloodWait secs correctly and respect exact wait
-      let secs: number | null = null;
-      if (typeof err.seconds === 'number' && Number.isFinite(err.seconds)) secs = err.seconds;
-      else {
-        const m = msg.match(/FLOOD_WAIT_(\d+)|retry after (\d+) seconds|wait of (\d+) seconds/i);
-        if (m) secs = parseInt(m[1] || m[2] || m[3] || '30', 10);
-        else if (msg.includes('FRESH_CHANGE_ADMINS_FORBIDDEN')) secs = 86400;
-      }
-      if (secs !== null && secs > 30) {
-        setGlobalFloodUntil(secs);
-        logger.warn(
-          `Startup FloodWait ${secs}s — global flood until ${new Date(Date.now() + secs * 1000).toISOString()}`,
-        );
-        // Don't tight-loop; wait a bit but not full 24h at startup — just break and let API handle
-        break;
-      }
-      if (msg.includes('not_authorized') || msg.includes('API_ID') || msg.includes('ENCRYPTION_KEY')) {
-        logger.warn('Auth/config error — will retry on next API request, not looping at startup');
-        break;
-      }
-      if (attempts < maxAttempts) {
-        const wait = Math.min(5000 * attempts + Math.random() * 2000, 15000);
-        logger.info(`Retrying ensureClient in ${Math.round(wait)}ms...`);
-        await new Promise((r) => setTimeout(r, wait));
-      }
+      const msg = String((e as Error).message || e);
+      logger.error('Pre-connect failed — will retry lazily on first API request', { error: msg });
     }
+  } else {
+    logger.info('ubot lazy mode — Telegram connect deferred until first channel/group request');
   }
 
   const app = createApi();
@@ -81,13 +57,13 @@ async function main() {
 
   // Graceful shutdown tracking
   let server: ReturnType<typeof app.listen> | null = null;
-  let periodicTimer: NodeJS.Timeout | null = null;
+  let sweeperTimer: NodeJS.Timeout | null = null;
 
   const shutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
     logger.info(`${signal} — shutting down (graceful)`);
-    if (periodicTimer) clearInterval(periodicTimer);
+    if (sweeperTimer) clearInterval(sweeperTimer);
     try {
       // Stop accepting new queue tasks, drain existing
       try {
@@ -125,30 +101,35 @@ async function main() {
     );
     if (config.apiKey) logger.info('UBOT_API_KEY auth enabled (timing-safe, header only)');
     else logger.warn('UBOT_API_KEY not set — internal API is OPEN (dev only) — set a 32+ char random key');
-    // Periodic auth check with jitter 60-75s to avoid bot signature; attempt auto-reconnect if disconnected (NAT idle close)
-    periodicTimer = setInterval(
-      async () => {
+    // Idle sweeper (LOCAL ONLY — zero Telegram calls): if no ensured activity for
+    // UBOT_IDLE_DISCONNECT_MS, close the MTProto connection. Next real request
+    // reconnects lazily via ensureClient(). Replaces the old 60-75s
+    // checkAuthorized poll (1 Telegram call/min, ~1440/day with zero deals).
+    // Keep-alive pings while connected are already throttled via UBOT_KEEPALIVE_MS.
+    if (config.idleDisconnectMs > 0) {
+      const idleMs = config.idleDisconnectMs;
+      sweeperTimer = setInterval(() => {
         try {
-          const ok = await checkAuthorized();
-          if (!ok) {
-            logger.warn('Periodic check: session no longer authorized — attempting ensureClient reconnect');
-            try {
-              await ensureClient();
-              logger.info('Periodic reconnect succeeded');
-            } catch (e) {
-              const msg = String((e as Error).message || e);
-              // Don't spam on expected not_authorized / FloodWait - already handled in ensureClient
-              if (!msg.includes('not_authorized') && !msg.includes('FLOOD_WAIT')) {
-                logger.warn(`Periodic reconnect failed: ${msg.slice(0, 200)}`);
-              }
-            }
+          if (isShuttingDown) return;
+          if (!getClient()) return; // not connected — nothing to do, and never connect from here
+          const idleFor = Date.now() - getLastActivityAt();
+          if (idleFor >= idleMs) {
+            void disconnectClient()
+              .then(() =>
+                logger.info(
+                  `Idle ${Math.round(idleFor / 1000)}s — MTProto disconnected (lazy reconnect on next request)`,
+                ),
+              )
+              .catch(() => undefined);
           }
         } catch {}
-      },
-      60_000 + Math.random() * 15000,
-    );
-    // Unref so interval doesn't block shutdown
-    periodicTimer.unref?.();
+      }, 60_000);
+      // Unref so interval doesn't block shutdown
+      sweeperTimer.unref?.();
+      logger.info(`Idle auto-disconnect enabled: ${Math.round(idleMs / 1000)}s (UBOT_IDLE_DISCONNECT_MS)`);
+    } else {
+      logger.info('Idle auto-disconnect disabled (UBOT_IDLE_DISCONNECT_MS=0) — connection stays up once established');
+    }
   });
 
   // Expose server for testing if needed

@@ -1,5 +1,5 @@
 import { Api } from 'teleproto';
-import { ensureClient, withFloodWait, isChannelBlocked } from './client';
+import { ensureClient, getClient, withFloodWait, isChannelBlocked } from './client';
 import logger, { sanitizeLogValue } from './logger';
 import { config } from './config';
 import { humanDelay } from './humanDelay';
@@ -329,8 +329,11 @@ export async function promoteToAdmin(
   if (isChannelBlocked('PEER_FLOOD')) {
     throw new Error('peer_flood: PEER_FLOOD breaker active');
   }
-  const client = await ensureClient();
+  // Single ensure via resolveChannel (it connects lazily); getClient reuses it —
+  // no second checkAuthorization per request.
   const channelEntity = await resolveChannel(channel);
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let userEntity: unknown;
   try {
     userEntity = await cachedGetEntity(
@@ -489,8 +492,10 @@ export async function transferChannelOwnership(
     throw new Error('admin_change_forbidden: FRESH breaker active — wait 24h before transferring ownership');
   }
 
-  const client = await ensureClient();
+  // Single ensure via resolveChannel (it connects lazily); getClient reuses it.
   const channelEntity = await resolveChannel(channel);
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let newOwnerEntity: unknown;
   try {
     newOwnerEntity = await cachedGetEntity(
@@ -581,9 +586,11 @@ export async function demoteAdminWithEntities(
 ): Promise<void> {
   if (!userEntity) throw new Error('userEntity required');
   if (isChannelBlocked('FRESH_CHANGE_ADMINS_FORBIDDEN')) {
-    throw new Error('admin_change_forbidden: FRESH breaker active');
+    throw new Error('admin_change_forbidden: FRESH breaker active — wait 24h');
   }
-  const client = await ensureClient();
+  // Entity-direct helper: caller already ensured the connection, reuse it.
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   await humanDelay(1000, 2000);
   await withFloodWait(() =>
     client.invoke(
@@ -619,8 +626,10 @@ export async function demoteAdmin(channel: string | number, userId: string | num
   if (isChannelBlocked('FRESH_CHANGE_ADMINS_FORBIDDEN')) {
     throw new Error('admin_change_forbidden: FRESH breaker active — wait 24h');
   }
-  const client = await ensureClient();
+  // Single ensure via resolveChannel (it connects lazily); getClient reuses it.
   const channelEntity = await resolveChannel(channel);
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   let userEntity: unknown;
   try {
     userEntity = await cachedGetEntity(
@@ -660,8 +669,11 @@ export async function demoteAdmin(channel: string | number, userId: string | num
 export async function listChannelAdmins(
   channel: string | number,
 ): Promise<Array<{ id: number | string; isCreator: boolean }>> {
-  const client = await ensureClient();
+  // Highest-frequency read path (every verify + confirm-escrow): single ensure via
+  // resolveChannel, reuse the client — previously 2x checkAuthorization per request.
   const channelEntity = await resolveChannel(channel);
+  const client = getClient();
+  if (!client) throw new Error('telegram_not_connected: lazy connect failed — retry the request');
   // Human delay before listing admins
   await humanDelay(800, 1500);
   // teleproto expects BigInteger for hash; JS BigInt is compatible at runtime.

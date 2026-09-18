@@ -1,4 +1,5 @@
 import { prefersReducedMotion } from './motion';
+import { icon, iconLabel, iconNames } from './icons';
 
 export function h(tag: string, attrs: Record<string, any> | null, children?: any): HTMLElement {
   const el = document.createElement(tag);
@@ -97,29 +98,45 @@ const STATUSES: Record<string, { label: string; cls: string; step: number }> = {
   AWAITING_DEPOSIT: { label: "To'lov kutilmoqda", cls: 'st-awaiting', step: 0 },
   DEPOSIT_CONFIRMED: { label: "Mablag' tushdi — mahsulotni yuboring", cls: 'st-funded', step: 1 },
   ITEM_SENT: { label: 'Yuborildi — xaridor tasdiqlaydi', cls: 'st-sent', step: 2 },
-  BUYER_CONFIRMED: { label: 'Xaridor tasdiqladi', cls: 'st-confirmed', step: 2 },
+  BUYER_CONFIRMED: { label: 'Xaridor tasdiqladi (eski holat — admin ko‘radi)', cls: 'st-confirmed', step: 2 },
+  RELEASE_PENDING: { label: 'Pul chiqarilmoqda…', cls: 'st-pending', step: 2 },
+  REFUND_PENDING: { label: 'Pul qaytarilmoqda…', cls: 'st-pending', step: 2 },
   RELEASED: { label: 'Yakunlandi', cls: 'st-released', step: 3 },
   REFUNDED: { label: 'Qaytarildi', cls: 'st-refunded', step: 3 },
 };
-export function statusMeta(status: string, deal?: any) {
-  const u = String(status || '').toUpperCase();
-  // Muddat o'tib avtomatik yopilgan bitim "Yopildi" ko'rinadi (pul hech
-  // qachon qimirlamagan, hamma ma'lumot serverda saqlanib qolgan).
+function dealConfirmations(deal?: any): any {
   try {
-    if (u === 'REFUNDED' && deal) {
-      let conf: any = (deal as any).confirmations;
-      if (typeof conf === 'string' && conf) {
-        try {
-          conf = JSON.parse(conf);
-        } catch {
-          conf = null;
-        }
-      }
-      if (conf && (conf as any).autoClosed === true) {
-        return { label: 'Yopildi', cls: 'st-refunded', step: 3 };
+    let conf: any = deal ? (deal as any).confirmations : null;
+    if (typeof conf === 'string' && conf) {
+      try {
+        conf = JSON.parse(conf);
+      } catch {
+        conf = null;
       }
     }
-  } catch {}
+    return conf && typeof conf === 'object' ? conf : null;
+  } catch {
+    return null;
+  }
+}
+
+export function statusMeta(status: string, deal?: any) {
+  const u = String(status || '').toUpperCase();
+  const conf = dealConfirmations(deal);
+  // Disputed deals get an explicit badge so users don't wonder why money stopped.
+  if (conf && conf.disputed === true) {
+    const base = STATUSES[u];
+    return {
+      label: (base ? base.label : String(status || "Noma'lum")) + ' · ⚖️ Nizo ochilgan',
+      cls: 'st-disputed',
+      step: base ? base.step : -1,
+    };
+  }
+  // Muddat o'tib avtomatik yopilgan bitim "Yopildi" ko'rinadi (pul hech
+  // qachon qimirlamagan, hamma ma'lumot serverda saqlanib qolgan).
+  if (u === 'REFUNDED' && conf && conf.autoClosed === true) {
+    return { label: 'Yopildi', cls: 'st-refunded', step: 3 };
+  }
   const m = STATUSES[u];
   return m || { label: String(status || "Noma'lum"), cls: 'st-unknown', step: -1 };
 }
@@ -132,6 +149,26 @@ export function assetMeta(asset: string) {
   if (a === 'TON') return { name: 'Toncoin', symbol: 'TON', glyph: '◈', cls: 'asset-ton' };
   if (a === 'USDT') return { name: 'Tether', symbol: 'USDT', glyph: '₮', cls: 'asset-usdt' };
   return { name: a || 'Aktiv', symbol: a || '?', glyph: '◆', cls: 'asset-any' };
+}
+/**
+ * Round asset logo element: TON uses the Gram circular badge PNG
+ * (/img/ton-badge.png, from the gram-pack); other assets keep the glyph
+ * circle. Extra attrs (e.g. inline style) pass through to the wrapper.
+ */
+export function assetIcon(am: { symbol: string; glyph: string; cls: string }, attrs?: Record<string, any>) {
+  if (String(am.symbol || '').toUpperCase() === 'TON') {
+    return h('div', Object.assign({ class: 'asset-glyph asset-ton has-img' }, attrs || {}), [
+      (() => {
+        const img = document.createElement('img');
+        img.className = 'asset-img';
+        img.src = '/img/ton-badge.png';
+        img.alt = 'TON';
+        img.draggable = false;
+        return img;
+      })(),
+    ]);
+  }
+  return h('div', Object.assign({ class: 'asset-glyph ' + am.cls, text: am.glyph }, attrs || {}));
 }
 export const feeBpsEstimate = 100;
 export function avatarClass(seed: any): string {
@@ -154,15 +191,84 @@ export function toast(message: string, type?: 'ok' | 'err') {
     root.removeChild(first);
   }
   const cls = type === 'ok' ? 'ok' : type === 'err' ? 'err' : '';
-  const t = h('div', { class: 'toast ' + cls, text: String(message) });
+  const t = h('div', { class: 'toast ' + cls, text: String(message), role: 'status' });
   root.appendChild(t);
+  // Errors carry long Uzbek guidance — keep them readable (was 3.4s).
   setTimeout(
     () => {
       t.classList.add('out');
       setTimeout(() => t.remove(), 260);
     },
-    type === 'err' ? 3400 : 2200,
+    type === 'err' ? 5200 : 2200,
   );
+}
+
+/**
+ * Backend error codes → Uzbek user guidance ("what happened + what to do").
+ * Raw codes like `fresh_forbidden_wait_24h` must never reach users verbatim.
+ * Unknown codes fall back to the raw message (still shown, never swallowed).
+ */
+const FRIENDLY_ERRORS: Array<{ re: RegExp; text: string }> = [
+  {
+    re: /deal_locked|payout_in_progress|concurrent_transition/i,
+    text: "To'lov jarayonda — birozdan keyin qayta urinib ko'ring, ikki marta bosmang.",
+  },
+  {
+    re: /needItemSent|DEPOSIT_CONFIRMED.*Yetkazdim/i,
+    text: 'Avval sotuvchi “Yetkazdim” ni bosishi shart — keyin tasdiqlaysiz.',
+  },
+  {
+    re: /seller_ton_address_required/i,
+    text: "Sotuvchi to'lov manzilini kiritmagan — sotuvchi xabardor qilindi, kiritgach qayta urinib ko'ring.",
+  },
+  { re: /buyer_ton_address_required/i, text: "Avval Profil bo'limida TON manzilingizni kiriting." },
+  {
+    re: /invalid_payout_address|invalid_ton_address/i,
+    text: "TON manzil noto'g'ri — nusxalashda xatolik bo'lmasin, qayta kiriting.",
+  },
+  {
+    re: /fresh_forbidden_wait_24h|FRESH_CHANGE_ADMINS/i,
+    text: "Telegram 24 soatlik cheklov qo'ydi (admin o'zgarishlari) — ertaga qayta urinib ko'ring.",
+  },
+  {
+    re: /user_not_participant/i,
+    text: "Yangi ega hali kanalda emas — avval kanalga qo'shiling, keyin qayta urinib ko'ring.",
+  },
+  {
+    re: /escrow_not_yet_received|not_yet_transferred/i,
+    text: "Kanal hali escrow ga o'tmagan — sotuvchi avval egalikni topshirishi kerak.",
+  },
+  {
+    re: /escrow_custody_lost/i,
+    text: "Escrow egaligi yo'qolgan — sotuvchi kanalni qayta topshirishi kerak, admin xabardor qilindi.",
+  },
+  { re: /link_expired/i, text: "Havola muddati o'tgan — yangisini so'rang." },
+  { re: /deal_already_full|already_party/i, text: "Bu bitimda joy yo'q yoki siz allaqachon qatnashchisiz." },
+  { re: /deal_finished|trade_already_final|already_released|already_refunded/i, text: 'Bitim allaqachon yakunlangan.' },
+  { re: /trade_expired/i, text: "Savdo muddati o'tgan (24 soat) — yangisini oching." },
+  { re: /buyer_not_set/i, text: 'Avval xaridor biriktirilmagan — sotuvchi /setbuyer ni bajarsin.' },
+  { re: /rate_limited|429/i, text: "Juda tez-tez urinyapsiz — biroz kuting va qayta urinib ko'ring." },
+  { re: /identity_required|sender_required|401/i, text: "Kirish muddati o'tgan — ilovani qayta oching." },
+  { re: /payout_failed|onchain_send_failed/i, text: "To'lovda xatolik — admin tekshirmoqda, qayta bosmang." },
+  {
+    re: /ubot_proxy_forbidden/i,
+    text: "Bu tugma o'chirilgan — kanal amallari faqat bitim sahifasidagi rasmiy oqim orqali bajariladi.",
+  },
+  {
+    re: /not_a_party|not_seller|not_buyer|only_seller|only_buyer|forbidden|403/i,
+    text: "Bu amal uchun huquqingiz yo'q.",
+  },
+];
+export function friendlyError(err: any): string {
+  const raw = String((err && (err.message || err.error)) || err || '');
+  for (const { re, text } of FRIENDLY_ERRORS) {
+    if (re.test(raw)) return text;
+  }
+  return raw || 'Xatolik yuz berdi — qayta urinib ko‘ring.';
+}
+/** Toast an error with user guidance instead of the raw backend code. */
+export function errToast(err: any) {
+  toast(friendlyError(err), 'err');
 }
 export function copy(text: string, label = 'Nusxalandi') {
   function fallbackCopy(t: string) {
@@ -348,6 +454,12 @@ export const UI = {
   avatarClass,
   counterpartyLabel,
   toast,
+  errToast,
+  friendlyError,
+  icon,
+  iconLabel,
+  iconNames,
+  assetIcon,
   copy,
   skeletonDeals,
   sheetOpen,

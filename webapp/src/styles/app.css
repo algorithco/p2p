@@ -1,5 +1,5 @@
 /* ============================================================
-   TonEscrow — Telegram Mini App design system (dark theme only)
+   Savdochi — Telegram Mini App design system (dark theme only)
    The white/light theme was removed; dark palette is always used.
    ============================================================ */
 
@@ -632,6 +632,20 @@ a {
 .asset-ton {
   background: radial-gradient(circle at 30% 25%, #60a5fa, #2563eb);
 }
+/* PNG badge fills the round logo (opaque artwork covers the gradient). */
+.asset-glyph.has-img {
+  background: none;
+  box-shadow: none;
+  overflow: hidden;
+}
+.asset-glyph .asset-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+  pointer-events: none;
+}
 .asset-usdt {
   background: radial-gradient(circle at 30% 25%, #34d399, #047857);
 }
@@ -1220,6 +1234,18 @@ select.input option {
 img.avatar {
   object-fit: cover;
 }
+/* Async profile photo inside an initials avatar: fills the circle, falls back
+   to initials when the photo is missing (see partyAvatar in legacy/app.js). */
+.avatar {
+  overflow: hidden;
+}
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
 .av-0 {
   background: linear-gradient(135deg, #f6a13c, #e05c3c);
 }
@@ -1805,50 +1831,6 @@ img.avatar {
   border-color: var(--success);
   color: var(--success);
 }
-/* wallet sheet options (premium) */
-.wallet-opt {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  margin-bottom: 8px;
-  cursor: pointer;
-  transition: 0.15s;
-  width: 100%;
-  text-align: left;
-}
-.wallet-opt:active {
-  transform: scale(0.98);
-  border-color: rgba(59, 130, 246, 0.35);
-}
-.wallet-opt.selected {
-  border-color: var(--accent);
-  background: rgba(59, 130, 246, 0.1);
-}
-.w-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  font-size: 18px;
-  font-weight: 800;
-  color: #fff;
-  flex-shrink: 0;
-}
-.w-tk {
-  background: radial-gradient(circle at 30% 25%, #38bdf8, #0ea5e9);
-}
-.w-mt {
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-}
-.w-w {
-  background: linear-gradient(135deg, #0ea5e9, #2563eb);
-}
-
 @media (min-width: 480px) {
   body {
     font-size: 15.5px;
@@ -1889,6 +1871,171 @@ img.avatar {
 .search-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ---------------- Animated icons (animate-ui set, native) ----------------
+   Inline lucide SVGs rendered by lib/icons.ts. Sizes follow font-size;
+   animations mirror animate-ui (tap/hover + subtle loops). Respects
+   prefers-reduced-motion via the global media rule at the end of file. */
+.ico {
+  width: 1.15em;
+  height: 1.15em;
+  flex-shrink: 0;
+  vertical-align: -0.22em;
+}
+.btn .ico,
+.list-item .ico {
+  margin-right: 2px;
+}
+/* pop-in on mount (badge-check, circle-check-big, party-popper) */
+@keyframes ico-pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.ico-pop {
+  animation: ico-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: center;
+}
+/* tap shake (trash-2, brush-cleaning) */
+@keyframes ico-shake {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  25% {
+    transform: rotate(-14deg);
+  }
+  50% {
+    transform: rotate(10deg);
+  }
+  75% {
+    transform: rotate(-6deg);
+  }
+}
+button:active .ico-shake {
+  animation: ico-shake 0.4s ease;
+  transform-origin: 50% 20%;
+}
+/* tap scale (copy, key, lock-keyhole) */
+button:active .ico-tap {
+  animation: ico-pop 0.3s ease;
+}
+/* alarm ring (alarm-clock on deadline warnings) */
+@keyframes ico-ring {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  10%,
+  30%,
+  50% {
+    transform: rotate(14deg);
+  }
+  20%,
+  40%,
+  60% {
+    transform: rotate(-14deg);
+  }
+}
+.ico-ring {
+  animation: ico-ring 1.6s ease-in-out infinite;
+  transform-origin: 50% 8%;
+}
+/* message wiggle on hover/tap */
+button:hover .ico-wiggle,
+button:active .ico-wiggle {
+  animation: ico-shake 0.45s ease;
+  transform-origin: center;
+}
+/* chevron rotate when parent is open */
+.open > .ico-chev,
+.ico-chev.open {
+  transform: rotate(180deg);
+}
+.ico-chev {
+  transition: transform 0.2s ease;
+}
+/* external-link arrow nudge */
+button:hover .ico-ext {
+  animation: ico-nudge 0.5s ease;
+}
+@keyframes ico-nudge {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(2px, -2px);
+  }
+}
+/* live dot pulse for router/online status */
+@keyframes ico-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.ico-pulse {
+  animation: ico-pulse 1.8s ease-in-out infinite;
+}
+/* send-button paper plane: flies on tap (animate-ui send) */
+.send-btn .ico {
+  width: 21px;
+  height: 21px;
+}
+.send-btn:active .ico-fly {
+  animation: ico-fly 0.45s ease;
+}
+@keyframes ico-fly {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  40% {
+    transform: translate(8px, -8px) scale(0.85);
+    opacity: 0.55;
+  }
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+}
+/* Join requests rendered as incoming message bubbles inside the chat flow
+   (not a separate top card): avatar + name + ✅/❌ message-like buttons. */
+.bubble.join-bubble {
+  max-width: 88%;
+}
+.join-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.join-bubble .avatar {
+  margin-bottom: 0;
+}
+.join-msg-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.join-msg-actions .btn {
+  flex: 1;
+  padding: 9px;
+  font-size: 13px;
 }
 
 /* ---------------- Home polish (scoped to #/home only) ----------------
@@ -2585,6 +2732,15 @@ img.avatar {
     animation: none;
   }
   #app-loader {
+    transition: none;
+  }
+  .ico-pop,
+  .ico-ring,
+  .ico-pulse,
+  .ico-fly {
+    animation: none;
+  }
+  .ico-chev {
     transition: none;
   }
 }

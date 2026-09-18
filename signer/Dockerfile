@@ -2,7 +2,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app/signer
 COPY signer/package*.json ./
-RUN npm ci || npm install
+RUN npm ci
 COPY signer/tsconfig.json ./
 COPY signer/src ./src
 RUN npm run build
@@ -13,7 +13,7 @@ ENV PORT=3001
 WORKDIR /app/signer
 RUN apk upgrade --no-cache && addgroup -S signer && adduser -S signer -G signer
 COPY signer/package*.json ./
-RUN npm ci --omit=dev || npm install --omit=dev
+RUN npm ci --omit=dev
 # Drop bundled npm/npx: unused at runtime, but ships vulnerable tar/brace-expansion copies that trip image scanners.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY --from=build /app/signer/dist ./dist

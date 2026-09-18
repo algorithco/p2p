@@ -94,8 +94,44 @@ function request(method: string, path: string, body?: any, opts: any = {}): Prom
     .finally(() => clearTimeout(timer));
 }
 
+/** In-memory object URLs for user avatars (revoked never — process-lifetime cache, tiny count). */
+const avatarUrlCache = new Map<number, string>();
+const avatarInflight = new Map<number, Promise<string | null>>();
+
 export const Api = {
   ApiError,
+  /**
+   * Counterparty avatar as an <img>-ready object URL (authenticated fetch —
+   * <img> tags can't carry x-init-data). Returns null when the user has no
+   * photo or it can't be loaded; callers keep the initials fallback then.
+   * Results (incl. null) are cached per session to avoid refetching per card.
+   */
+  userPhoto(id: number | string): Promise<string | null> {
+    const uid = Number(id);
+    if (!Number.isInteger(uid) || uid <= 0) return Promise.resolve(null);
+    const hit = avatarUrlCache.get(uid);
+    if (hit) return Promise.resolve(hit);
+    const pending = avatarInflight.get(uid);
+    if (pending) return pending;
+    const p = fetch(BASE + '/api/users/' + encodeURIComponent(String(uid)) + '/photo', {
+      headers: Object.assign({ Accept: 'image/*' } as any, authHeaders()),
+    })
+      .then((res) => {
+        if (!res.ok) return null;
+        return res.blob().then((b) => {
+          if (!b || !b.size) return null;
+          const url = URL.createObjectURL(b);
+          avatarUrlCache.set(uid, url);
+          return url;
+        });
+      })
+      .catch(() => null)
+      .finally(() => {
+        avatarInflight.delete(uid);
+      });
+    avatarInflight.set(uid, p);
+    return p;
+  },
   info(): Promise<{ adminTelegramIds: number[]; feeBps?: number; paymentAddress?: string; network?: string }> {
     return request('GET', '/api/info').then((d) => ({
       adminTelegramIds: (d && d.adminTelegramIds) || [],

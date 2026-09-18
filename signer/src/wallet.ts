@@ -1,8 +1,55 @@
 import { Address, Cell, beginCell, toNano, SendMode } from '@ton/core';
 import { TonClient, WalletContractV5R1 } from '@ton/ton';
-import { mnemonicToPrivateKey, KeyPair } from '@ton/crypto';
+import { mnemonicToPrivateKey, mnemonicValidate, KeyPair } from '@ton/crypto';
 import { config } from './config';
 import logger, { sanitizeLogValue } from './logger';
+
+/**
+ * Strict USDT-style (6 decimal) human amount → nano. Rejects anything that is
+ * not `^\d+(\.\d{1,6})?$` — notably multi-dot strings like "1.2.3" (which naive
+ * split('.') parsing silently truncates to 1.2) and hex/negative forms.
+ */
+export function parseJettonAmountToNano(amount: string): bigint {
+  const s = String(amount ?? '').trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(s)) {
+    throw new Error('invalid jetton amount: must be a non-negative decimal with ≤6 fraction digits');
+  }
+  const [whole, frac = ''] = s.split('.');
+  const fracPadded = (frac + '000000').slice(0, 6);
+  const nano = BigInt(whole) * 1000000n + BigInt(fracPadded);
+  if (nano <= 0n) throw new Error('jetton amount must be > 0');
+  return nano;
+}
+
+function parseTonValue(value: string): bigint {
+  let v: bigint;
+  try {
+    v = toNano(String(value));
+  } catch {
+    throw new Error(`invalid_value: cannot parse TON value ${JSON.stringify(String(value ?? ''))}`);
+  }
+  return v;
+}
+
+/** Optional per-transfer TON cap (MAX_SEND_TON, 0/unset = unlimited). Null = no cap. */
+function maxSendNano(): bigint | null {
+  const raw = String(config.maxSendTon ?? '').trim();
+  if (!raw || raw === '0') return null;
+  try {
+    const cap = toNano(raw);
+    return cap > 0n ? cap : null;
+  } catch {
+    logger.warn(`MAX_SEND_TON=${raw} unparsable — cap disabled`);
+    return null;
+  }
+}
+
+function assertSendCap(valueNano: bigint): void {
+  const cap = maxSendNano();
+  if (cap !== null && valueNano > cap) {
+    throw new Error(`send_cap_exceeded: transfer exceeds MAX_SEND_TON cap`);
+  }
+}
 
 const TONCENTER_MAINNET = 'https://toncenter.com/api/v2/jsonRPC';
 const TONCENTER_TESTNET = 'https://testnet.toncenter.com/api/v2/jsonRPC';
@@ -33,6 +80,20 @@ export class W5Signer {
       if (!config.mnemonic || config.mnemonic.length !== 24) {
         logger.warn('SIGNER_MNEMONIC not configured (need 24 words) — signer in no-wallet mode');
         return;
+      }
+      // Fail CLOSED on a typo'd seed: mnemonicToPrivateKey does NOT verify the
+      // BIP39 checksum, so without this a single mistyped word silently derives
+      // a WRONG (empty, unrecoverable-by-operator-expectation) wallet.
+      let checksumOk = false;
+      try {
+        checksumOk = await mnemonicValidate(config.mnemonic);
+      } catch (e) {
+        throw new Error(`invalid_mnemonic_checksum: mnemonic validation crashed: ${String(e)}`);
+      }
+      if (!checksumOk) {
+        throw new Error(
+          'invalid_mnemonic_checksum: SIGNER_MNEMONIC fails BIP39 checksum — refusing to derive a wrong wallet (check for typos/word order)',
+        );
       }
       try {
         const kp = await mnemonicToPrivateKey(config.mnemonic);
@@ -76,13 +137,15 @@ export class W5Signer {
     return this.client;
   }
 
-  async getState(): Promise<{ deployed: boolean; balance: bigint; address: string | null }> {
+  // NOTE: balance is a decimal STRING — JSON.stringify throws on raw bigint,
+  // which used to make GET /info 500 on every call.
+  async getState(): Promise<{ deployed: boolean; balance: string; address: string | null }> {
     const addr = this.getAddress();
-    if (!addr) return { deployed: false, balance: 0n, address: null };
+    if (!addr) return { deployed: false, balance: '0', address: null };
     const st = await this.client.getContractState(addr);
     return {
       deployed: st.state === 'active',
-      balance: st.balance,
+      balance: st.balance.toString(),
       address: this.getAddressString(),
     };
   }
@@ -91,6 +154,21 @@ export class W5Signer {
     const { wallet } = this.assertConfigured();
     const provider = this.client.provider(wallet.address, null);
     return wallet.getSeqno(provider);
+  }
+
+  /**
+   * Seqno fetch with a diagnosable error. A raw getSeqno failure is ambiguous:
+   * the wallet may be undeployed (fund + POST /deploy first) or the TON API
+   * may be unreachable — callers map this to 502 with the hint intact.
+   */
+  private async fetchSeqno(wallet: WalletContractV5R1, provider: ReturnType<TonClient['provider']>): Promise<number> {
+    try {
+      return await wallet.getSeqno(provider);
+    } catch (e) {
+      throw new Error(
+        `seqno_fetch_failed: ${String((e as Error)?.message || e)} (wallet may be undeployed — fund + POST /deploy — or TON API unreachable)`,
+      );
+    }
   }
 
   async getBalance(): Promise<bigint> {
@@ -111,7 +189,8 @@ export class W5Signer {
       throw new Error('already_deployed');
     }
     const balance = await this.getBalance();
-    const needed = toNano(value);
+    const needed = parseTonValue(value);
+    assertSendCap(needed);
     // W5 deploy needs enough for self-transfer + fees (~0.02 TON)
     if (balance < needed + toNano('0.02')) {
       throw new Error(
@@ -119,7 +198,7 @@ export class W5Signer {
       );
     }
     const provider = this.client.provider(wallet.address, null);
-    const seqno = await wallet.getSeqno(provider);
+    const seqno = await this.fetchSeqno(wallet, provider);
     // Try simple deploy via empty transfer with sendMode; many W5 implementations deploy via seqno tx even with no messages.
     // Fallback is self-transfer if seqno didn't advance.
     const { internal } = await import('@ton/ton');
@@ -148,8 +227,9 @@ export class W5Signer {
   }): Promise<{ seqno: number }> {
     const { wallet, keyPair } = this.assertConfigured();
     const toAddr = Address.parse(req.to);
-    const value = toNano(req.value);
+    const value = parseTonValue(req.value);
     if (value <= 0n) throw new Error('value must be > 0');
+    assertSendCap(value);
 
     if (!req.comment || !String(req.comment).trim())
       throw new Error('memo_required: comment memo is mandatory for every TON send');
@@ -161,7 +241,7 @@ export class W5Signer {
 
     const { internal } = await import('@ton/ton');
     const provider = this.client.provider(wallet.address, null);
-    const seqno = await wallet.getSeqno(provider);
+    const seqno = await this.fetchSeqno(wallet, provider);
 
     await wallet.sendTransfer(provider, {
       seqno,
@@ -191,7 +271,9 @@ export class W5Signer {
 
     const messages = requests.map((r) => {
       const addr = Address.parse(r.to);
-      const val = toNano(r.value);
+      const val = parseTonValue(r.value);
+      if (val <= 0n) throw new Error('value must be > 0');
+      assertSendCap(val);
       if (!r.comment || !String(r.comment).trim())
         throw new Error('memo_required: every batch TON send must include comment memo');
       if (String(r.comment).length > 120) throw new Error('memo_too_long');
@@ -205,7 +287,7 @@ export class W5Signer {
     });
 
     const provider = this.client.provider(wallet.address, null);
-    const seqno = await wallet.getSeqno(provider);
+    const seqno = await this.fetchSeqno(wallet, provider);
 
     await wallet.sendTransfer(provider, {
       seqno,
@@ -232,7 +314,10 @@ export class W5Signer {
     const { wallet, keyPair } = this.assertConfigured();
     const master = Address.parse(req.jettonMasterAddress);
     const dest = Address.parse(req.to);
-    const forwardTon = toNano(req.forwardTonAmount || '0.01');
+    const forwardTon = parseTonValue(req.forwardTonAmount || '0.01');
+    if (req.forwardComment && String(req.forwardComment).length > 120) {
+      throw new Error('forward_comment_too_long: forward memo max 120 chars');
+    }
     let jettonWalletAddr: Address | null = null;
     try {
       const { beginCell } = await import('@ton/core');
@@ -244,16 +329,8 @@ export class W5Signer {
     }
     if (!jettonWalletAddr) throw new Error('jetton_wallet_not_found');
 
-    let amountNano: bigint;
-    try {
-      // USDT-style 6 decimals
-      const [whole, frac = ''] = req.amount.trim().split('.');
-      const fracPadded = (frac + '0'.repeat(6)).slice(0, 6);
-      amountNano = BigInt(whole === '' ? '0' : whole) * 1000000n + BigInt(fracPadded === '' ? '0' : fracPadded);
-    } catch {
-      throw new Error('invalid jetton amount');
-    }
-    if (amountNano <= 0n) throw new Error('jetton amount must be > 0');
+    // Strict 6-decimal parse (rejects "1.2.3", hex, negatives — see parseJettonAmountToNano).
+    const amountNano = parseJettonAmountToNano(req.amount);
 
     let forwardPayload: Cell | null = null;
     if (req.forwardComment) {
@@ -272,7 +349,7 @@ export class W5Signer {
       .endCell();
 
     const provider = this.client.provider(wallet.address, null);
-    const seqno = await wallet.getSeqno(provider);
+    const seqno = await this.fetchSeqno(wallet, provider);
     const { internal } = await import('@ton/ton');
     await wallet.sendTransfer(provider, {
       seqno,
@@ -305,9 +382,18 @@ export class W5Signer {
   }): Promise<{ seqno: number; escrowAddress: string }> {
     const { wallet, keyPair } = this.assertConfigured();
     const toAddr = Address.parse(params.escrowAddress);
-    const code = Cell.fromBoc(Buffer.from(params.escrowStateInit.codeBoc, 'base64'))[0];
-    const data = Cell.fromBoc(Buffer.from(params.escrowStateInit.dataBoc, 'base64'))[0];
-    const value = toNano(params.value || '0.12');
+    let code: Cell;
+    let data: Cell;
+    try {
+      code = Cell.fromBoc(Buffer.from(params.escrowStateInit.codeBoc, 'base64'))[0];
+      data = Cell.fromBoc(Buffer.from(params.escrowStateInit.dataBoc, 'base64'))[0];
+      if (!code || !data) throw new Error('empty BOC');
+    } catch (e) {
+      throw new Error(`invalid_state_init_boc: codeBoc/dataBoc must be valid base64 BOCs: ${String(e)}`);
+    }
+    const value = parseTonValue(params.value || '0.12');
+    if (value <= 0n) throw new Error('value must be > 0');
+    assertSendCap(value);
     let body: Cell | undefined;
     if (params.bodyBoc) {
       try {
@@ -321,7 +407,7 @@ export class W5Signer {
 
     const { internal } = await import('@ton/ton');
     const provider = this.client.provider(wallet.address, null);
-    const seqno = await wallet.getSeqno(provider);
+    const seqno = await this.fetchSeqno(wallet, provider);
 
     await wallet.sendTransfer(provider, {
       seqno,

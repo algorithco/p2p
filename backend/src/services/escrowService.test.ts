@@ -55,6 +55,7 @@ import {
   buyerApproveReceipt,
   markItemSent,
   reconcileStuckPayouts,
+  retryFeePayout,
 } from './escrowService';
 
 const mockDb = vi.mocked(db);
@@ -242,7 +243,9 @@ describe('guardedTransition', () => {
       fee_bps: 100,
       seller_telegram_id: 111,
       buyer_telegram_id: 222,
-      payout_address: 'UQ_seller',
+      // Must be TON-parseable: guardedTransition validates the destination
+      // with Address.parse before committing PENDING.
+      payout_address: '0:' + '11'.repeat(32),
       terms: '',
       ...over,
     };
@@ -353,6 +356,46 @@ describe('markItemSent guards', () => {
     ]);
     mockDb.connect.mockResolvedValue(wrongStatus as never);
     expect((await markItemSent(111, 1)).success).toBe(false);
+  });
+});
+
+describe('retryFeePayout', () => {
+  function feeDeal(over: Record<string, unknown> = {}) {
+    return {
+      id: 1,
+      status: 'RELEASED',
+      asset: 'TON',
+      amount: '10',
+      fee_bps: 100,
+      fee_payout_failed: true,
+      fee_retry_count: 0,
+      ...over,
+    };
+  }
+
+  it('uses the STABLE fee key so ambiguous retries dedupe (no :retry:N rotation)', async () => {
+    mockDb.query.mockImplementation((sql: string) => {
+      if (/FROM deals/i.test(sql)) return Promise.resolve({ rowCount: 1, rows: [feeDeal()] } as never);
+      if (/RETURNING fee_retry_count/i.test(sql))
+        return Promise.resolve({ rowCount: 1, rows: [{ fee_retry_count: 1 }] } as never);
+      return Promise.resolve({ rowCount: 1, rows: [] } as never);
+    });
+    const r = await retryFeePayout(1);
+    expect(r.ok).toBe(true);
+    expect(mockSendTon).toHaveBeenCalledOnce();
+    expect(mockSendTon.mock.calls[0][0]).toMatchObject({ idempotencyKey: 'release:1:fee' });
+  });
+
+  it('losing the atomic claim backs off without sending (scheduler/admin race)', async () => {
+    mockDb.query.mockImplementation((sql: string) => {
+      if (/FROM deals/i.test(sql)) return Promise.resolve({ rowCount: 1, rows: [feeDeal()] } as never);
+      if (/RETURNING fee_retry_count/i.test(sql)) return Promise.resolve({ rowCount: 0, rows: [] } as never);
+      return Promise.resolve({ rowCount: 1, rows: [] } as never);
+    });
+    const r = await retryFeePayout(1);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/busy_or_exhausted/);
+    expect(mockSendTon).not.toHaveBeenCalled();
   });
 });
 
