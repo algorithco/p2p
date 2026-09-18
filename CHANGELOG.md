@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.1](https://github.com/algorithco/p2p/compare/v1.1.0...v1.1.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **ci:** ignore body line length in commitlint ([ab684a8](https://github.com/algorithco/p2p/commit/ab684a83553b8e007c73f5f640f2aa34ff03d30b))
+* **ci:** ignore body line length in commitlint ([f66ea19](https://github.com/algorithco/p2p/commit/f66ea19ffa7c5a1a11621973eb2b179082de8865))
+
+## [1.1.0](https://github.com/algorithco/p2pbot/compare/v1.0.1...v1.1.0) (2026-09-10)
+
+
+### Features
+
+* username, home polish, deal share links, offchain status ([#46](https://github.com/algorithco/p2pbot/issues/46)) ([e4d9530](https://github.com/algorithco/p2pbot/commit/e4d953001a014ac60d29be7241e17120c67d8373))
+
 ## [1.0.1](https://github.com/algorithco/p2pbot/compare/v1.0.0...v1.0.1) (2026-09-10)
 
 
