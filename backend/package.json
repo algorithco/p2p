@@ -6,7 +6,9 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
-    "dev": "ts-node --files src/index.ts"
+    "dev": "ts-node --files src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@ton/core": "^0.63.1",
@@ -30,7 +32,8 @@
     "@types/swagger-ui-express": "^4.1.8",
     "@types/uuid": "^10.0.0",
     "ts-node": "^10.9.0",
-    "typescript": "^5.0.0"
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
   },
   "overrides": {
     "qs": "^6.16.0"

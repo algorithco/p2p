@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -130,6 +130,6 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Audit production dependencies (high+)
+      - name: Audit production dependencies (moderate+)
         working-directory: ${{ matrix.package }}
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev --audit-level=moderate
