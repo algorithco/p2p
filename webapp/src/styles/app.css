@@ -1220,6 +1220,18 @@ select.input option {
 img.avatar {
   object-fit: cover;
 }
+/* Async profile photo inside an initials avatar: fills the circle, falls back
+   to initials when the photo is missing (see partyAvatar in legacy/app.js). */
+.avatar {
+  overflow: hidden;
+}
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
+}
 .av-0 {
   background: linear-gradient(135deg, #f6a13c, #e05c3c);
 }

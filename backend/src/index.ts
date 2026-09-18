@@ -1322,6 +1322,73 @@ app.get(
 // Requester profile photo — proxied bytes, party/admin only.
 // The DB stores a Telegram file_id (never a file URL: URLs embed the bot token).
 // The token stays server-side: we fetch upstream and stream bytes, never redirect.
+const photoLimiter = rateLimit({ windowMs: 60_000, max: 30, name: 'photo' });
+
+// Short-lived in-memory photo bytes cache (5 min, max 200 users): deal views
+// render 2 avatars per open, and Bot API getUserProfilePhotos+getFile+download
+// is 3 upstream calls per miss. No PII persisted — process memory only.
+const userPhotoCache = new Map<number, { buf: Buffer; ct: string; at: number }>();
+const USER_PHOTO_TTL_MS = 5 * 60 * 1000;
+function getCachedUserPhoto(id: number): { buf: Buffer; ct: string } | null {
+  const e = userPhotoCache.get(id);
+  if (!e) return null;
+  if (Date.now() - e.at > USER_PHOTO_TTL_MS) {
+    userPhotoCache.delete(id);
+    return null;
+  }
+  return { buf: e.buf, ct: e.ct };
+}
+function setCachedUserPhoto(id: number, buf: Buffer, ct: string): void {
+  if (userPhotoCache.size >= 200) {
+    const oldest = userPhotoCache.keys().next();
+    if (!oldest.done) userPhotoCache.delete(oldest.value);
+  }
+  userPhotoCache.set(id, { buf, ct, at: Date.now() });
+}
+
+/** Fetch raw Telegram file bytes server-side (bot token never leaves the server). */
+async function fetchTelegramFileBytes(fileId: string): Promise<{ buf: Buffer; ct: string } | null> {
+  const bot = getBot();
+  if (!bot || !config.botToken) return null;
+  let file: { file_path?: string } | null = null;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      file = (await Promise.race([
+        bot.api.getFile(fileId),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo_timeout')), 4000)),
+      ])) as { file_path?: string } | null;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+  if (!file?.file_path) return null;
+  try {
+    const upstream = `https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const up = (await fetch(upstream, { signal: ctrl.signal })) as unknown as {
+        ok: boolean;
+        headers: { get(name: string): string | null };
+        arrayBuffer(): Promise<ArrayBuffer>;
+      };
+      if (!up.ok) return null;
+      const ct = up.headers.get('content-type') || 'image/jpeg';
+      if (!ct.startsWith('image/')) return null;
+      const buf = Buffer.from(await up.arrayBuffer());
+      if (!buf.length || buf.length > 1024 * 1024) return null;
+      return { buf, ct };
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return null;
+  }
+}
 app.get(
   '/api/deals/:id/join-requests/:requestId/photo',
   rateLimit({ windowMs: 60_000, max: 30, name: 'photo' }),
@@ -1369,6 +1436,47 @@ app.get(
     } catch {
       return res.status(502).json({ error: 'photo_upstream_failed' });
     }
+  }),
+);
+
+// User profile photo — proxied bytes for deal avatars.
+// Privacy: a caller may fetch ONLY their own photo, photos of users they share
+// at least one deal with (buyer/seller either side), or admins. This prevents
+// harvesting arbitrary Telegram users' profile pictures by id enumeration.
+app.get(
+  '/api/users/:id/photo',
+  photoLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const caller = getIdentityId(req);
+    if (caller === null) return res.status(401).json({ error: 'identity_required' });
+    if (caller !== targetId && !isPrivileged(req, caller)) {
+      try {
+        const shared = await db.query(
+          `SELECT 1 FROM deals WHERE (buyer_telegram_id = $1 OR seller_telegram_id = $1) AND (buyer_telegram_id = $2 OR seller_telegram_id = $2) LIMIT 1`,
+          [caller, targetId],
+        );
+        if (!shared.rows.length) return res.status(403).json({ error: 'not_a_party_to_user' });
+      } catch {
+        return res.status(503).json({ error: 'db_unavailable' });
+      }
+    }
+    const cached = getCachedUserPhoto(targetId);
+    if (cached) {
+      res.setHeader('Content-Type', cached.ct);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.send(cached.buf);
+    }
+    const fileId = await resolveRequesterPhotoFileId(targetId);
+    if (!fileId) return res.status(404).json({ error: 'photo_not_available' });
+    const data = await fetchTelegramFileBytes(fileId);
+    if (!data) return res.status(404).json({ error: 'photo_not_available' });
+    setCachedUserPhoto(targetId, data.buf, data.ct);
+    res.setHeader('Content-Type', data.ct);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.send(data.buf);
   }),
 );
 
