@@ -75,7 +75,7 @@ export function addAddressToMonitor(address: string) {
   logger.info(`Listener: added ${normalized} to monitor`);
 }
 
-interface DealRow {
+export interface DealRow {
   id: number;
   asset: string | null;
   amount: string | null;
@@ -219,7 +219,7 @@ async function notifySellerDeposit(deal: DealRow) {
   );
 }
 
-async function processTonDeposit(
+export async function processTonDeposit(
   addr: string,
   src: Address | null,
   value: bigint,
@@ -451,7 +451,7 @@ function parseJettonNotification(body: Cell): JettonNotification | null {
   }
 }
 
-async function processJettonDeposit(
+export async function processJettonDeposit(
   addr: string,
   note: JettonNotification,
   forwardComment: string | null,

@@ -1,6 +1,7 @@
 // src/services/escrowService.ts
 import { db } from '../db/queries';
 import { DEAL_STATUS, getDealById } from './dealService';
+import { DEAL_ACTIONS, assertTransition } from './dealTransitions';
 import { config } from '../config';
 import logger from '../logger';
 import { releaseComment } from '../utils/comments';
@@ -66,24 +67,23 @@ async function resolvePayoutAddress(
   return null;
 }
 
-/** Valid transitions for guarded release/refund. */
-function isValidTransition(currentStatus: string, nextStatus: string): boolean {
+/** Valid transitions for guarded release/refund — delegates to centralized dealTransitions table (P1-3).
+ * Single source of truth: dealTransitions.TRANSITION_TABLE. This function is kept for backward
+ * compat and now thin-wraps assertTransition so both money-moving and DB-only paths agree.
+ */
+export function isValidTransition(currentStatus: string, nextStatus: string): boolean {
   if (nextStatus === DEAL_STATUS.REFUNDED) {
-    // AWAITING_DEPOSIT excluded: refunding before any deposit would pay out
-    // from the signer hot wallet with no backing funds.
-    return [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT, DEAL_STATUS.BUYER_CONFIRMED].includes(
-      currentStatus as any,
-    );
+    const r = assertTransition(currentStatus, DEAL_ACTIONS.REFUND);
+    return r.ok && r.next === DEAL_STATUS.REFUNDED;
   }
   if (nextStatus === DEAL_STATUS.RELEASED) {
-    return [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT, DEAL_STATUS.BUYER_CONFIRMED].includes(
-      currentStatus as any,
-    );
+    const r = assertTransition(currentStatus, DEAL_ACTIONS.RELEASE);
+    return r.ok && r.next === DEAL_STATUS.RELEASED;
   }
   return false;
 }
 
-function feeParts(
+export function feeParts(
   amountStr: string,
   assetUpper: string,
   feeBpsRaw: unknown,
@@ -119,19 +119,19 @@ function feeParts(
  * `reconcileStuckPayouts` (run at boot) flags to admins for MANUAL on-chain
  * verification — we never blindly auto-retry, because the transfer may have landed.
  */
-function payoutIdempotencyKey(dealId: number, status: string): string {
+export function payoutIdempotencyKey(dealId: number, status: string): string {
   return `${status === DEAL_STATUS.RELEASED ? 'release' : 'refund'}:${dealId}`;
 }
 
-function pendingStatusFor(status: string): string {
+export function pendingStatusFor(status: string): string {
   return status === DEAL_STATUS.RELEASED ? DEAL_STATUS.RELEASE_PENDING : DEAL_STATUS.REFUND_PENDING;
 }
 
-function isPendingStatus(status: unknown): boolean {
+export function isPendingStatus(status: unknown): boolean {
   return status === DEAL_STATUS.RELEASE_PENDING || status === DEAL_STATUS.REFUND_PENDING;
 }
 
-interface PayoutPlan {
+export interface PayoutPlan {
   assetUpper: string;
   principalHuman: string; // what the party receives (price on release; price+fee on refund)
   amountStr: string; // deal price (human), for logging/alerts
@@ -156,7 +156,7 @@ interface PayoutPlan {
  * must still finalize — but the missing fee is returned for persistent recording
  * (`fee_payout_failed`), never just a log line.
  */
-async function executePayout(
+export async function executePayout(
   plan: PayoutPlan,
   dealId: number,
 ): Promise<{ feeFailed: boolean; feeError: string | null }> {
@@ -174,7 +174,10 @@ async function executePayout(
         `Deal #${dealId} fee ${feeHuman} ${assetUpper} NOT sent to fee address: ${feeError} — reconcile manually`,
         { dealId, feeHuman, asset: assetUpper, feeError, feeAddress: config.feeAddress },
       );
-    } catch {} // best-effort: hub notify below is the backstop; alert-table write must not throw.
+    } catch (alertErr) {
+      // P3: fee failure already warned above; hub notify below is the backstop.
+      logger.warn(`fee_payout_failed alert save failed for deal #${dealId}`, alertErr);
+    }
     await notifyAdminsHub(
       `Deal #${dealId} fee failed: ${feeError} — ${feeHuman} ${assetUpper} to fee address not sent.`,
       feeHuman,
@@ -280,7 +283,7 @@ export async function reconcileStuckPayouts(stuckAfterMinutes = 15): Promise<num
  * On REFUNDED: buyer gets amount+fee (their full original deposit); no fee leg fires.
  * Crash-safe: three-phase PENDING + idempotency key (see IDEMPOTENCY MODEL above).
  */
-async function guardedTransition(
+export async function guardedTransition(
   dealId: number,
   status: string,
   opts?: { toAddress?: string; amount?: string | number; asset?: string; terms?: string },

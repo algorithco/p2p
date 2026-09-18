@@ -195,12 +195,15 @@ export async function ensureTables() {
     }
   }
 
-  // Defense-in-depth: restrict deals.status to the canonical enum (incl. transient
-  // payout PENDING states from group A). NOTE: Postgres has no
-  // `ADD CONSTRAINT IF NOT EXISTS`, so same try/catch pattern as above.
+  // Defense-in-depth: restrict deals.status to canonical enum. P2-8: BUYER_CONFIRMED removed from valid set (dead, never written).
+  // Legacy rows with BUYER_CONFIRMED remain readable but new writes must not produce it.
+  try {
+    // Attempt to migrate old constraint that included BUYER_CONFIRMED: drop if exists then add new
+    await pool.query(`ALTER TABLE deals DROP CONSTRAINT IF EXISTS chk_deals_status`);
+  } catch {}
   try {
     await pool.query(`ALTER TABLE deals ADD CONSTRAINT chk_deals_status CHECK (status IN (
-      'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT','BUYER_CONFIRMED',
+      'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT',
       'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED'
     ))`);
   } catch (e) {

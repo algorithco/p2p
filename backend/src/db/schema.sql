@@ -72,7 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_deals_status ON deals(status);
 -- Enum guard (boot applies via try/catch ADD CONSTRAINT — PG has no IF NOT EXISTS
 -- for constraints — see queries.ts ensureTables).
 ALTER TABLE deals ADD CONSTRAINT chk_deals_status CHECK (status IN (
-  'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT','BUYER_CONFIRMED',
+  'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT',
   'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED'
 ));
 
