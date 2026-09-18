@@ -1060,6 +1060,41 @@ app.post(
   }),
 );
 
+// P2-7: dispute writer — buyer or seller can flag a deal as disputed, surfaces in /disputes for admin review
+app.post(
+  '/api/deals/:id/dispute',
+  dealActionLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const caller = getIdentityId(req);
+    if (caller === null) return res.status(401).json({ error: 'identity_required' });
+    const deal = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    const isParty =
+      (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
+      (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
+    if (!isParty) return res.status(403).json({ error: 'not_a_party_to_deal' });
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(String(deal.status))) {
+      return res.status(409).json({ error: 'deal_finished: cannot dispute closed deal' });
+    }
+    await db.query(
+      `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"disputed":true}'::jsonb, updated_at = now() WHERE id = $1`,
+      [dealId],
+    );
+    try {
+      const { addDealMessage } = await import('./services/dealService');
+      await addDealMessage(dealId, 0, `Tizim: Nizo ochildi (Deal #${dealId}) — admin ko'rib chiqadi.`);
+    } catch {}
+    try {
+      const { saveAdminAlert } = await import('./db/queries');
+      await saveAdminAlert('disputed', `Deal #${dealId} disputed by ${caller}`, { dealId, by: caller });
+    } catch {}
+    res.json({ ok: true });
+  }),
+);
+
 // Join requests — list pending for a deal (party/admin only)
 app.get(
   '/api/deals/:id/join-requests',
@@ -2532,7 +2567,7 @@ function startSchedulers() {
           if (String(d.status) === 'RELEASED' || String(d.status) === 'REFUNDED') continue;
           try {
             // P1-3: single source validation via dealTransitions
-             
+
             const { DEAL_ACTIONS, assertTransition, guardedStatusUpdate } = await import('./services/dealTransitions');
             const tr = assertTransition(String(d.status), DEAL_ACTIONS.EXPIRE);
             if (!tr.ok) {
