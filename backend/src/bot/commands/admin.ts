@@ -13,6 +13,7 @@ export function registerAdminCommands(bot: Bot) {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const dealId = (ctx.match || '').trim();
     if (!dealId) return ctx.reply(`Foydalanish: /admin_release <deal_id>\nMasalan: /admin_release 12`);
+    if (!/^\d{1,10}$/.test(dealId)) return ctx.reply(`❌ Noto'g'ri deal_id — faqat raqam kiriting.`);
     const result = await adminRelease(ctx.from!.id, dealId);
     if (result.success) {
       await ctx.reply(`✅ Deal #${dealId} chiqarildi.\nPul sotuvchiga yuborildi.`);
@@ -25,6 +26,7 @@ export function registerAdminCommands(bot: Bot) {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const dealId = (ctx.match || '').trim();
     if (!dealId) return ctx.reply(`Foydalanish: /admin_refund <deal_id>\nMasalan: /admin_refund 12`);
+    if (!/^\d{1,10}$/.test(dealId)) return ctx.reply(`❌ Noto'g'ri deal_id — faqat raqam kiriting.`);
     const result = await adminRefund(ctx.from!.id, dealId);
     if (result.success) {
       await ctx.reply(`✅ Deal #${dealId} qaytarildi.\nPul xaridorga qaytdi.`);

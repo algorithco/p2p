@@ -17,15 +17,30 @@ function kbFor(dealId: number | string): InlineKeyboard | undefined {
   return new InlineKeyboard().webApp('Ilovani ochish', url);
 }
 
+/**
+ * Escape user-influenced text for Telegram HTML parse_mode.
+ * All templates in this file are plain text (no intentional tags), so escaping
+ * at the sink closes stored/reflected HTML injection (e.g. a joiner username
+ * like `<a href="https://evil">admin</a>` rendering as a phishing link).
+ */
+export function escapeHtml(s: string): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function send(chatId: number | string, text: string, dealId?: number | string): Promise<void> {
   try {
     const bot = getBot();
     if (!bot) return;
+    const safe = escapeHtml(text);
     const kb = dealId !== undefined ? kbFor(dealId) : undefined;
     if (kb) {
-      await bot.api.sendMessage(Number(chatId), text, { parse_mode: 'HTML', reply_markup: kb });
+      await bot.api.sendMessage(Number(chatId), safe, { parse_mode: 'HTML', reply_markup: kb });
     } else {
-      await bot.api.sendMessage(Number(chatId), text, { parse_mode: 'HTML' });
+      await bot.api.sendMessage(Number(chatId), safe, { parse_mode: 'HTML' });
     }
   } catch {
     // never throw
@@ -132,9 +147,10 @@ export async function unknownDepositToAdmins(info: {
       `Manzil: ${info.address}`,
       `Memo: ${info.memo}`,
     ].join('\n');
+    const safe = escapeHtml(text);
     for (const adminId of config.adminTelegramIds) {
       try {
-        await bot.api.sendMessage(Number(adminId), text, { parse_mode: 'HTML' });
+        await bot.api.sendMessage(Number(adminId), safe, { parse_mode: 'HTML' });
       } catch {
         // ignore per-admin errors
       }

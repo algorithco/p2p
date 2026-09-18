@@ -41,6 +41,7 @@ import {
   rateLimit,
   getIdentityId,
   isValidPositiveInt,
+  adminApiKeyMatches,
 } from './auth/guard';
 
 const app = express();
@@ -136,9 +137,27 @@ const joinLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'join' });
 const publicTonLimiter = rateLimit({ windowMs: 60_000, max: 30, name: 'public-ton-api' });
 // State-changing deal actions are DB-guarded but must not be hammerable.
 const dealActionLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'deal-action' });
+// Money-moving / secret-bearing endpoints get tighter buckets.
+const payoutLimiter = rateLimit({ windowMs: 60_000, max: 10, name: 'payout' });
+const keyLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'deal-key' });
+const utradeCodeLimiter = rateLimit({ windowMs: 60_000, max: 5, name: 'utrade-code' });
+const adminMoneyLimiter = rateLimit({ windowMs: 60_000, max: 10, name: 'admin-money' });
+// join-status shares traffic shape with joins but must not eat the join budget.
+const recheckLimiter = rateLimit({ windowMs: 60_000, max: 20, name: 'recheck' });
 
 function isAdminTelegramId(id: number): boolean {
   return config.adminTelegramIds.map(Number).includes(Number(id));
+}
+
+/**
+ * Operator privilege for deal/chat/channel/utrade routes.
+ * ADMIN_API_KEY (x-admin-api-key / Bearer) or a verified admin Telegram id.
+ * Generic x-api-key NEVER grants privilege: it is a shared static secret with
+ * no identity, and honoring it as admin (+ body.telegramId impersonation) was
+ * a full account-takeover primitive for any key holder.
+ */
+function isPrivileged(req: Request, caller: number | null): boolean {
+  return adminApiKeyMatches(req) || (caller !== null && isAdminTelegramId(caller));
 }
 
 /**
@@ -165,7 +184,7 @@ async function checkDealAccess(
   const isParty =
     (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
     (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-  const isAdmin = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+  const isAdmin = isPrivileged(req, caller);
   if (isParty || isAdmin) return { deal, hasAccess: true, isParty, isAdmin };
   // Token preview: valid invite token or pending join request
   const token = String((req.query.token as string) || '').trim();
@@ -193,6 +212,10 @@ app.post(
   asyncHandler(async (req, res) => {
     const { chatId, message } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId and message required' });
+    // Bound the admin-spam primitive: numeric chat id only (no @channel broadcast),
+    // message capped well below the 256kb JSON limit to bound DB bloat.
+    if (!isValidPositiveInt(Number(chatId))) return res.status(400).json({ error: 'chatId_must_be_positive_int' });
+    if (String(message).length > 1000) return res.status(400).json({ error: 'message_too_long', max: 1000 });
     const bot = getBot();
     if (!bot) return res.status(503).json({ error: 'bot_not_configured' });
     await bot.api.sendMessage(chatId, String(message));
@@ -329,6 +352,7 @@ app.post(
 app.post(
   '/api/deals/:id/payout-address',
   requireIdentity,
+  payoutLimiter,
   asyncHandler(async (req, res) => {
     const dealId = Number(req.params.id);
     if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
@@ -337,8 +361,14 @@ app.post(
     const deal = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isSeller && !isAdminCaller) return res.status(403).json({ error: 'only_seller_can_set_payout' });
+    // Money-diversion guard: payout address is immutable once money is moving
+    // or moved. Without this, a rewrite racing /approve diverts the payout.
+    const payoutStatus = String(deal.status || '').toUpperCase();
+    if (['RELEASE_PENDING', 'REFUND_PENDING', 'RELEASED', 'REFUNDED'].includes(payoutStatus)) {
+      return res.status(409).json({ error: `deal_locked: payout address frozen in ${payoutStatus}` });
+    }
     const raw = String(
       (req.body as any).tonAddress || (req.body as any).ton_address || (req.body as any).address || '',
     ).trim();
@@ -381,7 +411,7 @@ app.get(
   asyncHandler(async (req, res) => {
     try {
       const caller = getIdentityId(req);
-      const isAdmin = req.authMode === 'api-key' || (caller !== null && isAdminTelegramId(caller));
+      const isAdmin = isPrivileged(req, caller);
       if (isAdmin) {
         return res.json(await listDeals(100));
       }
@@ -429,8 +459,7 @@ app.post(
     if (!check) return res.status(404).json({ error: 'deal_not_found' });
     // Invite mint requires actual party membership — token-preview holders
     // (hasAccess via ?token=) must NOT be able to mint fresh links.
-    if (!check.isParty && (req as any).authMode !== 'api-key')
-      return res.status(403).json({ error: 'not_a_party_to_deal' });
+    if (!check.isParty && !adminApiKeyMatches(req)) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const deal = check.deal as unknown as Record<string, unknown>;
     const status = String(deal.status || '').toUpperCase();
     if (status === 'RELEASED' || status === 'REFUNDED') return res.status(400).json({ error: 'deal_finished' });
@@ -462,7 +491,7 @@ app.post(
   }),
 );
 
-// Create a new deal (buyer optional for api-key callers, returns generated link)
+// Create a new deal (explicit buyer/seller only for ADMIN_API_KEY operator calls, returns generated link)
 app.post(
   '/api/deals',
   dealsCreateLimiter,
@@ -515,9 +544,12 @@ app.post(
     const cpRaw = (req.body as any).counterpartyId ?? (req.body as any).counterparty ?? (req.body as any).cp;
     const cpId = isValidPositiveInt(Number(cpRaw)) ? Number(cpRaw) : null;
 
-    if (req.authMode !== 'api-key') {
-      const meId = req.user ? req.user.id : Number(req.headers['x-telegram-user-id']) || null;
-      if (!meId) return res.status(401).json({ error: 'identity_required' });
+    // Operator tooling authenticates via ADMIN_API_KEY and may set explicit
+    // buyerId/sellerId. Everyone else creates as themselves (verified id only —
+    // the old x-telegram-user-id header fallback was an impersonation hole).
+    if (!adminApiKeyMatches(req)) {
+      const meId = getIdentityId(req);
+      if (meId === null) return res.status(401).json({ error: 'identity_required' });
       const role = String((req.body as Record<string, unknown>).role || 'buy').toLowerCase();
       const origSellerId = sellerId;
       const origBuyerId = buyerId;
@@ -694,6 +726,8 @@ app.post(
     const dealId = Number(req.params.id);
     const token = String(req.params.token || '');
     if (!Number.isInteger(dealId) || !token) return res.status(400).json({ error: 'invalid_request' });
+    // Bound token shape before DB lookup (uuid links are 36 chars; be liberal but finite).
+    if (token.length > 128 || !/^[A-Za-z0-9_-]+$/.test(token)) return res.status(400).json({ error: 'invalid_token' });
 
     let telegramId: number | null;
     let requesterUsername: string | null = null;
@@ -836,6 +870,7 @@ async function resolveRequesterPhotoFileId(telegramId: number): Promise<string |
 app.get(
   '/api/deals/:id/key',
   requireIdentity,
+  keyLimiter,
   asyncHandler(async (req, res) => {
     const dealId = Number(req.params.id);
     if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
@@ -877,7 +912,7 @@ app.get(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = req.authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
 
     const rows = await getDealMessages(dealId, limit);
@@ -916,18 +951,11 @@ app.post(
             : '';
     const content = typeof body.content === 'string' ? body.content.trim() : '';
 
-    // Sender identity is FORCED server-side; body senderTelegramId only trusted from api-key callers.
-    let senderTelegramId: number | null;
-    if (
-      req.authMode === 'api-key' &&
-      req.body &&
-      isValidPositiveInt((req.body as Record<string, unknown>).senderTelegramId)
-    ) {
-      senderTelegramId = Number((req.body as Record<string, unknown>).senderTelegramId);
-    } else {
-      senderTelegramId = req.user && isValidPositiveInt(req.user.id) ? req.user.id : null;
-    }
-    if (senderTelegramId === null) return res.status(400).json({ error: 'sender_required' });
+    // Sender identity is FORCED server-side from the verified identity only.
+    // (Removed body.senderTelegramId trust for api-key callers: shared-secret
+    // impersonation of any deal party.)
+    const senderTelegramId: number | null = req.user && isValidPositiveInt(req.user.id) ? req.user.id : null;
+    if (senderTelegramId === null) return res.status(401).json({ error: 'identity_required' });
 
     // Only a party to the deal (or an admin/api-key caller) may post.
     const deal = await getDealById(dealId);
@@ -935,7 +963,7 @@ app.post(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === senderTelegramId) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === senderTelegramId);
-    const isAdminCaller = req.authMode === 'api-key' || isAdminTelegramId(senderTelegramId);
+    const isAdminCaller = isPrivileged(req, senderTelegramId);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
 
     // Validate payload
@@ -1103,7 +1131,7 @@ app.get(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const rows = await db.query(
       'SELECT * FROM deal_join_requests WHERE deal_id = $1 AND status = $2 ORDER BY created_at DESC',
@@ -1309,7 +1337,7 @@ app.get(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const jr = await getJoinRequestById(requestId).catch(() => null);
     if (!jr || Number(jr.deal_id) !== dealId) return res.status(404).json({ error: 'request_not_found' });
@@ -1344,10 +1372,11 @@ app.get(
   }),
 );
 
-// Manual recheck — "Toldim, tekshiring" button: poll payment address once, return current status
+// Manual recheck — "Toldim, tekshiring" button: poll payment address once, return current status.
+// Own bucket: sharing the join budget let recheck spam starve real joins.
 app.post(
   '/api/deals/:id/recheck',
-  joinLimiter,
+  recheckLimiter,
   requireIdentity,
   asyncHandler(async (req, res) => {
     const dealId = Number(req.params.id);
@@ -1359,7 +1388,7 @@ app.post(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
     try {
       if (deal.payment_address) await recheckAddress(String(deal.payment_address));
@@ -1385,7 +1414,7 @@ app.post(
     const deal: any = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isSeller && !isAdminCaller) return res.status(403).json({ error: 'only_seller_can_verify' });
     const dealType = String(deal.deal_type || 'P2P').toUpperCase();
     if (dealType !== 'CHANNEL' && dealType !== 'GROUP') return res.status(400).json({ error: 'not_channel_deal' });
@@ -1408,6 +1437,11 @@ app.post(
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     if (String(deal.deal_type).toUpperCase() !== 'CHANNEL' && String(deal.deal_type).toUpperCase() !== 'GROUP')
       return res.status(400).json({ error: 'not_channel_deal' });
+    // Ownership gate like the sibling channel routes: any authenticated user
+    // must not be able to drive another deal's escrow flow (grief/spam).
+    // (requestTransferToEscrow re-checks seller server-side as defense in depth.)
+    const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller;
+    if (!isSeller && !isPrivileged(req, caller)) return res.status(403).json({ error: 'only_seller_can_request' });
     const { requestTransferToEscrow } = await import('./services/escrowService');
     const r = await requestTransferToEscrow(dealId, caller);
     if (!r.ok) return res.status(400).json({ error: r.error });
@@ -1426,7 +1460,7 @@ app.post(
     const deal: any = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isSeller && !isAdminCaller) return res.status(403).json({ error: 'only_seller_can_confirm' });
     const { confirmTransferToEscrow } = await import('./services/escrowService');
     const r = await confirmTransferToEscrow(caller, dealId);
@@ -1446,7 +1480,7 @@ app.post(
     const deal: any = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isSeller = deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isSeller && !isAdminCaller) return res.status(403).json({ error: 'only_seller_can_payout' });
     const rawAddr = String(
       (req.body as any).tonAddress || (req.body as any).ton_address || (req.body as any).address || '',
@@ -1495,7 +1529,7 @@ app.post(
     const deal: any = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isBuyer = deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isBuyer && !isAdminCaller) return res.status(403).json({ error: 'only_buyer_can_set_new_owner' });
     if (String(deal.status) !== 'RELEASED')
       return res.status(409).json({ error: `invalid_status ${deal.status} need RELEASED` });
@@ -1517,6 +1551,7 @@ app.post(
 app.post(
   '/api/deals/:id/channel/transfer-to-buyer',
   channelLimiter,
+  payoutLimiter,
   requireIdentity,
   asyncHandler(async (req, res) => {
     const dealId = Number(req.params.id);
@@ -1526,7 +1561,7 @@ app.post(
     const deal: any = await getDealById(dealId);
     if (!deal) return res.status(404).json({ error: 'deal_not_found' });
     const isBuyer = deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller;
-    const isAdminCaller = (req as any).authMode === 'api-key' || isAdminTelegramId(caller);
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isBuyer && !isAdminCaller) return res.status(403).json({ error: 'only_buyer_can_transfer' });
     const raw = String(
       (req.body as any).newOwner ||
@@ -1680,10 +1715,6 @@ function utradeEncryptSession(plain: string): string {
   const tag = cipher.getAuthTag();
   return Buffer.concat([iv, tag, enc]).toString('base64');
 }
-function utradeMaskPhone(phone: string): string {
-  if (!phone || phone.length < 7) return phone || '';
-  return phone.slice(0, 3) + '****' + phone.slice(-2);
-}
 
 // Create trade — accepts {session} or {phone}
 app.post(
@@ -1694,6 +1725,10 @@ app.post(
     if (caller === null) return res.status(401).json({ error: 'identity_required' });
     const { session, phone } = req.body as any;
     if (!session && !phone) return res.status(400).json({ error: 'session_or_phone_required' });
+    // E.164 at creation too (the /phone route already enforces it — don't let
+    // creation smuggle an unparsable phone past it).
+    if (phone && !/^\+?\d{7,15}$/.test(String(phone).trim().replace(/[\s-]/g, '')))
+      return res.status(400).json({ error: 'invalid_phone' });
     let enc = '';
     try {
       if (session) {
@@ -1805,13 +1840,14 @@ app.get(
       phonePlain = String(trade.phone);
     }
     const tradeWithPhone = { ...trade, phone: phonePlain };
-    // mask phone for non-owners
+    // Party-or-admin only: sequential ids made full enumeration trivial, and
+    // even masked rows leaked both parties' Telegram ids (phishing target list).
     const caller = getIdentityId(req);
     const isParty =
       caller !== null && (Number(trade.seller_telegram_id) === caller || Number(trade.buyer_telegram_id) === caller);
-    const isAdminCaller = (req as any).authMode === 'api-key' || (caller !== null && isAdminTelegramId(caller));
+    const isAdminCaller = isPrivileged(req, caller);
     if (!isParty && !isAdminCaller) {
-      return res.json({ ...tradeWithPhone, phone: utradeMaskPhone(String(phonePlain || '')) });
+      return res.status(403).json({ error: 'not_a_party_to_trade' });
     }
     return res.json(tradeWithPhone);
   }),
@@ -1826,14 +1862,14 @@ app.post(
     if (!phone || !/^\+?\d{7,15}$/.test(phone.replace(/[\s-]/g, '')))
       return res.status(400).json({ error: 'invalid_phone' });
     const caller = getIdentityId(req);
-    const r = await db.query('SELECT seller_telegram_id FROM utrade_trades WHERE id = $1', [id]);
+    const r = await db.query('SELECT seller_telegram_id, status, expires_at FROM utrade_trades WHERE id = $1', [id]);
     if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
-    if (
-      Number(r.rows[0].seller_telegram_id) !== caller &&
-      (req as any).authMode !== 'api-key' &&
-      !isAdminTelegramId(caller!)
-    )
+    if (Number(r.rows[0].seller_telegram_id) !== caller && !adminApiKeyMatches(req) && !isAdminTelegramId(caller!))
       return res.status(403).json({ error: 'not_seller' });
+    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(r.rows[0].status)))
+      return res.status(400).json({ error: 'trade_already_final', status: String(r.rows[0].status) });
+    if (r.rows[0].expires_at && new Date(r.rows[0].expires_at).getTime() <= Date.now())
+      return res.status(410).json({ error: 'trade_expired' });
     try {
       await db.query('ALTER TABLE utrade_trades ADD COLUMN IF NOT EXISTS phone_enc TEXT');
     } catch {}
@@ -1853,17 +1889,26 @@ app.post(
     const id = Number(req.params.id);
     const buyerId = Number((req.body as any).buyerId || (req.body as any).buyer_id);
     if (!isValidPositiveInt(buyerId)) return res.status(400).json({ error: 'buyerId_required' });
-    const r = await db.query('SELECT seller_telegram_id, buyer_telegram_id FROM utrade_trades WHERE id = $1', [id]);
+    const r = await db.query(
+      'SELECT seller_telegram_id, buyer_telegram_id, status, expires_at FROM utrade_trades WHERE id = $1',
+      [id],
+    );
     if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
     const caller = getIdentityId(req);
-    if (
-      Number(r.rows[0].seller_telegram_id) !== caller &&
-      (req as any).authMode !== 'api-key' &&
-      !isAdminTelegramId(caller!)
-    )
+    if (Number(r.rows[0].seller_telegram_id) !== caller && !adminApiKeyMatches(req) && !isAdminTelegramId(caller!))
       return res.status(403).json({ error: 'not_seller' });
+    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(r.rows[0].status)))
+      return res.status(400).json({ error: 'trade_already_final', status: String(r.rows[0].status) });
+    if (r.rows[0].expires_at && new Date(r.rows[0].expires_at).getTime() <= Date.now())
+      return res.status(410).json({ error: 'trade_expired' });
     if (r.rows[0].buyer_telegram_id) return res.status(409).json({ error: 'buyer_already_set' });
-    await db.query('UPDATE utrade_trades SET buyer_telegram_id = $1, updated_at = now() WHERE id = $2', [buyerId, id]);
+    // Guarded write: concurrent buyer-bind or racing finalization must not overwrite.
+    const upd = await db.query(
+      `UPDATE utrade_trades SET buyer_telegram_id = $1, updated_at = now()
+       WHERE id = $2 AND buyer_telegram_id IS NULL AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+      [buyerId, id],
+    );
+    if (upd.rowCount === 0) return res.status(409).json({ error: 'concurrent_update_retry' });
     return res.json({ ok: true });
   }),
 );
@@ -1873,19 +1918,23 @@ app.post(
   requireIdentity,
   asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    const r = await db.query('SELECT seller_telegram_id, status FROM utrade_trades WHERE id = $1', [id]);
+    const r = await db.query('SELECT seller_telegram_id, status, expires_at FROM utrade_trades WHERE id = $1', [id]);
     if (!r.rows.length) return res.status(404).json({ error: 'not_found' });
     const caller = getIdentityId(req);
-    if (
-      Number(r.rows[0].seller_telegram_id) !== caller &&
-      (req as any).authMode !== 'api-key' &&
-      !isAdminTelegramId(caller!)
-    )
+    if (Number(r.rows[0].seller_telegram_id) !== caller && !adminApiKeyMatches(req) && !isAdminTelegramId(caller!))
       return res.status(403).json({ error: 'not_seller' });
     const st = String(r.rows[0].status);
     if (st !== 'SELLER_REMOVED' && st !== 'AWAITING_PAYMENT')
       return res.status(400).json({ error: 'invalid_status_' + st });
-    await db.query("UPDATE utrade_trades SET status = 'PHONE_SHARED', updated_at = now() WHERE id = $1", [id]);
+    if (r.rows[0].expires_at && new Date(r.rows[0].expires_at).getTime() <= Date.now())
+      return res.status(410).json({ error: 'trade_expired' });
+    // Guarded write: a racing teleproto COMPLETED must win over a late confirm.
+    const upd = await db.query(
+      `UPDATE utrade_trades SET status = 'PHONE_SHARED', updated_at = now()
+       WHERE id = $1 AND status IN ('SELLER_REMOVED','AWAITING_PAYMENT')`,
+      [id],
+    );
+    if (upd.rowCount === 0) return res.status(409).json({ error: 'concurrent_update_retry' });
     return res.json({ ok: true, status: 'PHONE_SHARED' });
   }),
 );
@@ -1893,6 +1942,7 @@ app.post(
 app.post(
   '/api/utrade/trades/:id/code',
   requireIdentity,
+  utradeCodeLimiter,
   asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
     const code = String((req.body as any).code || '').trim();
@@ -1908,17 +1958,24 @@ app.post(
       return res.status(403).json({ error: 'buyer_not_set: trade has no buyer yet' });
     }
     const isBuyer = caller !== null && Number(trade.buyer_telegram_id) === caller;
-    if (!isBuyer && (req as any).authMode !== 'api-key') return res.status(403).json({ error: 'not_buyer' });
+    if (!isBuyer && !adminApiKeyMatches(req)) return res.status(403).json({ error: 'not_buyer' });
     const st = String(trade.status);
     if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(st))
       return res.status(400).json({ error: 'trade_already_final', status: st });
+    if (trade.expires_at && new Date(trade.expires_at).getTime() <= Date.now())
+      return res.status(410).json({ error: 'trade_expired' });
     // Fix 3.4: never auto-complete via backend webapp — we cannot verify Telegram code without teleproto (utradebot).
     // Mark for manual review and log event; real verification must happen via utradebot teleproto.
     if (password) {
-      await db.query(
-        "UPDATE utrade_trades SET status = 'AWAITING_BUYER_LOGIN', updated_at = now(), meta = COALESCE(meta,'{}'::jsonb) || '{\"webapp_2fa_submitted\":true}'::jsonb WHERE id = $1",
+      if (!['PHONE_SHARED', 'AWAITING_CODE', 'AWAITING_BUYER_LOGIN'].includes(st)) {
+        return res.status(409).json({ error: 'invalid_status_' + st, detail: 'seller must share phone first' });
+      }
+      const upd2fa = await db.query(
+        `UPDATE utrade_trades SET status = 'AWAITING_BUYER_LOGIN', updated_at = now(), meta = COALESCE(meta,'{}'::jsonb) || '{"webapp_2fa_submitted":true}'::jsonb
+         WHERE id = $1 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
         [id],
       );
+      if (upd2fa.rowCount === 0) return res.status(409).json({ error: 'concurrent_update_retry' });
       try {
         await db.query(
           'INSERT INTO utrade_events (trade_id, actor_telegram_id, event, meta) VALUES ($1,$2,$3,$4::jsonb)',
@@ -1932,12 +1989,18 @@ app.post(
       });
     }
     if (/^\d{5,6}$/.test(code)) {
-      // First code submission moves PHONE_SHARED -> AWAITING_CODE; subsequent stays AWAITING_CODE (never COMPLETED)
-      const newSt = st === 'PHONE_SHARED' ? 'AWAITING_CODE' : 'AWAITING_CODE';
-      await db.query(
-        `UPDATE utrade_trades SET status = $1, updated_at = now(), meta = COALESCE(meta,'{}'::jsonb) || '{"webapp_code_submitted":true}'::jsonb WHERE id = $2`,
-        [newSt, id],
+      // Code accepted only after the seller shared the phone (PHONE_SHARED) —
+      // skipping straight from SELLER_REMOVED would bypass payment confirmation.
+      // Re-submits from AWAITING_CODE/AWAITING_BUYER_LOGIN stay (never COMPLETED).
+      if (!['PHONE_SHARED', 'AWAITING_CODE', 'AWAITING_BUYER_LOGIN'].includes(st)) {
+        return res.status(409).json({ error: 'invalid_status_' + st, detail: 'seller must share phone first' });
+      }
+      const upd = await db.query(
+        `UPDATE utrade_trades SET status = 'AWAITING_CODE', updated_at = now(), meta = COALESCE(meta,'{}'::jsonb) || '{"webapp_code_submitted":true}'::jsonb
+         WHERE id = $1 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+        [id],
       );
+      if (upd.rowCount === 0) return res.status(409).json({ error: 'concurrent_update_retry' });
       try {
         await db.query(
           'INSERT INTO utrade_events (trade_id, actor_telegram_id, event, meta) VALUES ($1,$2,$3,$4::jsonb)',
@@ -1955,26 +2018,21 @@ app.post(
   }),
 );
 
-// Fallback proxy for other utrade paths (e.g. /health) — keep for completeness
-app.use(
-  '/api/utrade-fallback',
-  requireIdentity,
-  asyncHandler(async (req, res) => {
-    const targetPath = req.originalUrl.replace(/^\/api\/utrade-fallback/, '') || '/';
-    const p = targetPath.startsWith('/') ? targetPath : '/' + targetPath;
-    const qIdx = req.originalUrl.indexOf('?');
-    const q = qIdx !== -1 ? req.originalUrl.slice(qIdx) : '';
-    const finalPath = p.split('?')[0] + q;
-    return proxyToService(config.utradeUrl, config.utradeApiKey, req, res, finalPath);
-  }),
-);
+// NOTE: the old /api/utrade-fallback open proxy was REMOVED (2026-09-18).
+// It forwarded ANY authenticated method/path to utradebot with only
+// requireIdentity — a bypass around per-trade ownership checks (unlike the
+// locked-down /api/ubot allowlist). utradebot's HTTP surface is read-only
+// anyway (GET /health, GET /api/trades/:id); every trade mutation already has
+// a native backend route above with proper seller/buyer guards.
 
 // Withdraw endpoint (admin-only; guarded release via adminRelease)
 app.post(
   '/api/withdraw',
   requireAdmin,
+  adminMoneyLimiter,
   asyncHandler(async (req, res) => {
     const { dealId } = req.body;
+    if (!isValidPositiveInt(Number(dealId))) return res.status(400).json({ error: 'dealId_required_positive_int' });
     const caller = getIdentityId(req);
     const adminId = caller ?? config.adminTelegramIds[0] ?? 0;
     const { adminRelease } = await import('./services/escrowService');
@@ -1987,8 +2045,10 @@ app.post(
 app.post(
   '/api/refund',
   requireAdmin,
+  adminMoneyLimiter,
   asyncHandler(async (req, res) => {
     const { dealId } = req.body;
+    if (!isValidPositiveInt(Number(dealId))) return res.status(400).json({ error: 'dealId_required_positive_int' });
     const caller = getIdentityId(req);
     const adminId = caller ?? config.adminTelegramIds[0] ?? 0;
     const { adminRefund } = await import('./services/escrowService');
@@ -2159,19 +2219,22 @@ const API_DOCS = {
   auth: {
     telegram:
       'x-init-data (HMAC-SHA256 via BOT_TOKEN) + x-telegram-user-id — verified in src/auth/initData.ts, 24h window',
-    apiKey: 'x-api-key: <API_KEY> header only (timing-safe, see src/auth/guard.ts)',
+    apiKey:
+      'x-api-key: <API_KEY> legacy operator header (timing-safe). Grants NO identity and NO admin rights since 2026-09: verified x-init-data (or ADMIN_API_KEY for admin ops) is required. Do not share — rotate to ADMIN_API_KEY workflows.',
     devFallback:
       'x-telegram-user-id only when ALLOW_DEV_AUTH=true and BOT_TOKEN+API_KEY unset (never in prod; NODE_ENV=production refuses to start without auth)',
-    admin: 'Telegram id in ADMIN_TELEGRAM_IDS or any api-key caller',
+    admin:
+      'Telegram id in ADMIN_TELEGRAM_IDS (verified x-init-data) OR x-admin-api-key: <ADMIN_API_KEY> / Bearer <ADMIN_API_KEY>. Generic x-api-key is explicitly NOT admin (see requireAdmin, src/auth/guard.ts).',
   },
   rateLimits:
-    'global 300/min · create deal 10/min · join/recheck 20/min · chat post 60/min · notify 5/min · deal confirm/ship/approve 20/min · public TON status/balance/payload 30/min (sliding window per IP+route, in-memory per process)',
+    'global 300/min · create deal 10/min · join 20/min · recheck 20/min · chat post 60/min · deal-key 20/min · payout 10/min · utrade-code 5/min · admin-money 10/min · channel-verify 20/min · deal-action 20/min · notify 5/min · public TON status/balance 30/min (sliding window per IP+route, in-memory per process)',
   endpoints: [
     {
       method: 'GET',
       path: '/api/info',
       auth: 'public',
-      desc: 'Health + feeBps, paymentAddress, network, adminTelegramIds, encryption',
+      desc: 'Health {feeBps, paymentAddress, network} — use feeBps for exact price+fee math',
+      errors: '—',
     },
     { method: 'GET', path: '/tonconnect-manifest.json', auth: 'public', desc: 'TON Connect manifest (dynamic origin)' },
     { method: 'GET', path: '/api/docs', auth: 'public', desc: 'This doc (JSON)' },
@@ -2199,19 +2262,74 @@ const API_DOCS = {
       method: 'GET',
       path: '/api/deals/mine',
       auth: 'Identity',
-      desc: 'Alias for GET /api/deals — deals where caller is buyer or seller (requires x-init-data or x-api-key)',
+      desc: 'Alias for GET /api/deals — deals where caller is buyer or seller (verified x-init-data)',
+      errors: '401 identity_required',
     },
     {
       method: 'POST',
       path: '/api/deals',
-      auth: 'Identity',
-      desc: 'Create deal {role: buy|sell, asset TON|USDT, amount, terms?, deadline?} — caller becomes buyer (buy) or seller (sell), counterparty joins via link, returns {deal, link, webappLink, encryption}',
+      auth: 'Identity (ADMIN_API_KEY may set explicit buyerId/sellerId)',
+      desc: 'Create deal {role: buy|sell, asset TON|USDT, amount, terms≤2000, deadline future?, dealType P2P|CHANNEL|GROUP, channelUsername?, buyerWalletAddress?} — caller becomes buyer (buy) or seller (sell), counterparty joins via link, returns {deal, link, webappLink, encryption}. 10/min.',
+      errors:
+        '400 asset_unsupported|amount_must_be_positive|terms_too_long · 401 · 429 · 503 payment_address_not_configured',
     },
     {
       method: 'POST',
       path: '/api/deals/:id/join/:token',
       auth: 'Identity',
-      desc: 'Request to join via link — creates pending request for creator approval in deal chat (joiner fills empty slot)',
+      desc: 'Request to join via link — 202 {pending:true, requestId}; creator approves in deal chat (link NOT consumed on request). Joiner fills the empty slot.',
+      errors:
+        '400 already_party|deal_has_no_creator · 404 invalid_token · 409 deal_already_full|deal_finished|deal_locked · 410 link_expired',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/ship',
+      auth: 'Identity (seller)',
+      desc: 'Seller marks item sent: DEPOSIT_CONFIRMED → ITEM_SENT. Required before buyer can approve.',
+      errors: '400 invalid_transition · 401 · 403 · 409 concurrent_transition',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/approve',
+      auth: 'Identity (buyer)',
+      desc: 'Buyer confirms receipt: ITEM_SENT → RELEASED, seller paid (fee split to feeAddress). Only from ITEM_SENT.',
+      errors:
+        '400 invalid_transition · 401 · 403 · 409 needItemSent|concurrent_transition|payout_in_progress · 402 seller_ton_address_required',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/dispute',
+      auth: 'Identity (party)',
+      desc: 'Open dispute — flags deal for admin review (no automatic money movement).',
+      errors: '401 · 403 · 409 deal_finished',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/recheck',
+      auth: 'Identity (party or admin)',
+      desc: 'Force immediate on-chain re-poll of the deal payment address (" Tekshiring" button). 20/min.',
+      errors: '401 · 403 · 429',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/payout-address',
+      auth: 'Identity (seller or admin)',
+      desc: 'Set per-deal payout destination (TON address). Frozen once payout starts/finishes. 10/min.',
+      errors: '400 invalid_ton_address · 401 · 403 only_seller_can_set_payout · 409 deal_locked',
+    },
+    {
+      method: 'GET',
+      path: '/api/users/me',
+      auth: 'Identity',
+      desc: 'Own profile (telegram id, username, saved TON address)',
+      errors: '401',
+    },
+    {
+      method: 'POST',
+      path: '/api/users/me/ton-address',
+      auth: 'Identity',
+      desc: 'Save own TON address (used for payouts + deposit sender checks)',
+      errors: '400 invalid_ton_address · 401',
     },
     {
       method: 'POST',
@@ -2239,9 +2357,10 @@ const API_DOCS = {
     },
     {
       method: 'GET',
-      path: '/api/deals/:id/join-status?token=',
+      path: '/api/deals/:id/join-status',
       auth: 'Identity',
-      desc: 'Joiner own request status (none|pending|approved|rejected) — token-scoped, caller-bound',
+      desc: 'Joiner own request status (none|pending|approved|rejected) — pass ?token=<invite> (query, not path)',
+      errors: '400 invalid_request · 404 deal_not_found',
     },
     {
       method: 'GET',
@@ -2265,7 +2384,79 @@ const API_DOCS = {
       method: 'GET',
       path: '/api/deals/:id/key',
       auth: 'Identity (party or admin)',
-      desc: 'Get per-deal E2E chat key {key, algo: aes-256-gcm} — only buyer/seller/admin',
+      desc: 'Get per-deal chat key {key, algo: aes-256-gcm} — encrypted at rest, admin-accessible (NOT E2E vs operator). 20/min.',
+      errors: '401 identity_required · 403 not_a_party_to_deal · 404 · 429',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/verify',
+      auth: 'Identity (seller or admin)',
+      desc: 'Verify seller owns the channel/group (ubot admins check) — required before escrow transfer. 20/min.',
+      errors: '400 not_channel_deal · 401 · 403 only_seller_can_verify',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/request-escrow',
+      auth: 'Identity (seller or admin)',
+      desc: 'Ask seller to transfer channel ownership to the escrow holder (@gramchioka). 20/min.',
+      errors: '400 not_channel_deal · 401 · 403 only_seller_can_request',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/confirm-escrow',
+      auth: 'Identity (seller or admin)',
+      desc: 'Confirm escrow holder now owns the channel (fresh on-chain admin check). 20/min.',
+      errors: '400 not_yet_transferred|deal_finished · 401 · 403',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/payout',
+      auth: 'Identity (seller or admin)',
+      desc: 'Pay seller for a custodial channel deal — re-verifies escrow custody FRESH before releasing money. 20/min.',
+      errors:
+        '402 seller_ton_address_required · 409 escrow_not_yet_received|escrow_custody_lost · 400 already_released',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/set-new-owner',
+      auth: 'Identity (buyer or admin, status=RELEASED)',
+      desc: 'Buyer sets @username to receive the channel after seller was paid. 20/min.',
+      errors: '400 invalid_username|newOwner_required · 401 · 403 · 409 invalid_status',
+    },
+    {
+      method: 'POST',
+      path: '/api/deals/:id/channel/transfer-to-buyer',
+      auth: 'Identity (buyer or admin, status=RELEASED)',
+      desc: 'Transfer channel ownership escrow → buyer via ubot (invite + takeover). 10/min.',
+      errors: '400 user_not_participant_try_invite · 401 · 403 · 409 · 429 fresh_forbidden_wait_24h',
+    },
+    {
+      method: 'GET',
+      path: '/api/rating',
+      auth: 'Identity',
+      desc: 'Counterparty rating summary',
+      errors: '401',
+    },
+    {
+      method: 'GET',
+      path: '/api/admin/stuck',
+      auth: 'Admin',
+      desc: 'Deals stuck in RELEASE_/REFUND_PENDING (crash window) — manual on-chain review queue. 10/min.',
+      errors: '403 forbidden',
+    },
+    {
+      method: 'GET',
+      path: '/api/admin/fee-failures',
+      auth: 'Admin',
+      desc: 'Deals whose fee leg failed (principal already paid). 10/min.',
+      errors: '403 forbidden',
+    },
+    {
+      method: 'POST',
+      path: '/api/admin/fee-retry/:id',
+      auth: 'Admin',
+      desc: 'Retry one failed fee leg (atomic claim, stable key, max 5 attempts). 10/min.',
+      errors: '400 no_fee_failure|retry_busy_or_exhausted · 403 forbidden',
     },
     {
       method: 'GET',
@@ -2318,14 +2509,40 @@ const API_DOCS = {
     {
       method: 'GET',
       path: '/api/utrade/trades/:id',
-      auth: 'Identity',
-      desc: 'Get account trade by id (phone masked for non-party)',
+      auth: 'Identity (party or admin — others get 403)',
+      desc: 'Get account trade by id (full phone only for party/admin)',
+      errors: '401 · 403 not_a_party_to_trade · 404 not_found',
+    },
+    {
+      method: 'POST',
+      path: '/api/utrade/trades/:id/phone',
+      auth: 'Identity (seller or admin)',
+      desc: 'Set trade phone (E.164) — encrypted at rest. Rejected once final/expired.',
+      errors: '400 invalid_phone|trade_already_final · 401 · 403 not_seller · 410 trade_expired',
+    },
+    {
+      method: 'POST',
+      path: '/api/utrade/trades/:id/buyer',
+      auth: 'Identity (seller or admin)',
+      desc: 'Bind buyer (one-shot, guarded). Rejected once final/expired.',
+      errors:
+        '400 buyerId_required · 401 · 403 not_seller · 409 buyer_already_set|concurrent_update_retry · 410 trade_expired',
+    },
+    {
+      method: 'POST',
+      path: '/api/utrade/trades/:id/confirm-payment',
+      auth: 'Identity (seller or admin)',
+      desc: 'Seller confirms off-chain payment received → PHONE_SHARED (guarded, from SELLER_REMOVED/AWAITING_PAYMENT only).',
+      errors:
+        '400 invalid_status_*|trade_already_final · 401 · 403 not_seller · 409 concurrent_update_retry · 410 trade_expired',
     },
     {
       method: 'POST',
       path: '/api/utrade/trades/:id/code',
-      auth: 'Identity (buyer)',
-      desc: 'Submit 5-6 digit code / 2FA → AWAITING_CODE / AWAITING_BUYER_LOGIN (manual review via utradebot teleproto, never auto-COMPLETED via backend)',
+      auth: 'Identity (buyer, 5/min)',
+      desc: 'Submit 5-6 digit code / 2FA → AWAITING_CODE / AWAITING_BUYER_LOGIN (manual review via utradebot teleproto, never auto-COMPLETED via backend). Requires PHONE_SHARED first.',
+      errors:
+        '400 code_required · 401 · 403 not_buyer|buyer_not_set · 409 invalid_status_*|trade_already_final · 410 trade_expired · 429',
     },
     { method: 'POST', path: '/api/notify', auth: 'Admin', desc: 'Send bot message {chatId, message} — rate 5/min' },
     { method: 'GET', path: '/api/notifications', auth: 'Admin', desc: 'Last 200 notifications' },
@@ -2351,8 +2568,9 @@ const API_DOCS = {
     {
       method: 'GET',
       path: '/api/ton/payload',
-      auth: 'public',
-      desc: 'Encode comment to TON Connect payload {comment, payload: base64} — memo for ALL TON tx',
+      auth: 'Identity',
+      desc: 'Encode comment to TON Connect payload {comment, payload: base64} — memo for ALL TON tx (comment≤120)',
+      errors: '401 identity_required',
     },
     {
       method: 'GET',
@@ -2396,9 +2614,10 @@ const API_DOCS = {
     },
   },
   headers: {
-    'x-init-data': 'Telegram WebApp initData (required for Identity when not api-key)',
-    'x-telegram-user-id': 'Fallback when api-key/dev only',
-    'x-api-key': 'Shared secret if API_KEY set',
+    'x-init-data': 'Telegram WebApp initData (HMAC, 24h) — required for Identity',
+    'x-telegram-user-id': 'Dev-only fallback (ALLOW_DEV_AUTH=true, non-prod, no keys set)',
+    'x-api-key': 'Legacy operator header — grants NO identity/admin since 2026-09 (kept for tooling compat)',
+    'x-admin-api-key / Authorization: Bearer': 'ADMIN_API_KEY — operator admin auth',
     'x-signer-key / x-api-key (signer)': 'SIGNER_API_KEY',
     'x-ubot-key / x-api-key (ubot)': 'UBOT_API_KEY',
   },
@@ -2425,7 +2644,9 @@ app.use(
   swaggerUi.setup(undefined, {
     explorer: true,
     customSiteTitle: 'TON Escrow — Swagger UI',
+    // swaggerUrl (legacy key) + swaggerOptions.url (v5 key): one of them always wins.
     swaggerUrl: '/api/openapi.json',
+    swaggerOptions: { url: '/api/openapi.json' },
   }),
 );
 
@@ -2433,16 +2654,39 @@ app.get('/api/openapi.json', (req, res) => {
   const host = req.get('host') || 'localhost:3000';
   const scheme = host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https';
   const servers = [{ url: `${scheme}://${host}` }];
-  // Minimal OpenAPI 3.0 from API_DOCS
+  // OpenAPI 3.0 generated from API_DOCS: path params, per-op security, error codes.
   const paths: Record<string, unknown> = {};
   for (const ep of API_DOCS.endpoints) {
-    const p = ep.path.replace(/:(\w+)/g, '{$1}');
+    const p = (ep.path as string).replace(/:(\w+)/g, '{$1}');
     if (!paths[p]) paths[p] = {};
-    const m = ep.method.toLowerCase();
+    const m = (ep.method as string).toLowerCase();
+    const params = Array.from((ep.path as string).matchAll(/:(\w+)/g)).map((mm) => ({
+      name: mm[1],
+      in: 'path',
+      required: true,
+      schema: { type: mm[1] === 'id' || mm[1] === 'requestId' ? 'integer' : 'string' },
+    }));
+    if (/\?token=/.test(ep.path as string)) {
+      params.push({ name: 'token', in: 'query', required: false, schema: { type: 'string' } });
+    }
+    const auth = String((ep as { auth?: unknown }).auth || '');
+    const security =
+      auth.startsWith('public') || auth.startsWith('Admin')
+        ? auth.startsWith('Admin')
+          ? [{ adminKey: [] }]
+          : []
+        : [{ initData: [] }];
+    const errCodes = Array.from(String((ep as { errors?: unknown }).errors || '').matchAll(/\b(4\d\d)\b/g)).map(
+      (mm) => mm[1],
+    );
+    const responses: Record<string, unknown> = { '200': { description: 'OK' } };
+    for (const c of new Set(errCodes)) responses[c] = { description: `Error (${c}) — see errors field` };
     (paths[p] as Record<string, unknown>)[m] = {
       summary: ep.desc,
-      tags: [ep.auth],
-      responses: { '200': { description: 'OK' } },
+      tags: [auth.split(/[ (]/)[0] || 'misc'],
+      parameters: params.length ? params : undefined,
+      security: security.length ? security : undefined,
+      responses,
     };
   }
   res.json({
@@ -2453,7 +2697,7 @@ app.get('/api/openapi.json', (req, res) => {
     components: {
       securitySchemes: {
         initData: { type: 'apiKey', in: 'header', name: 'x-init-data' },
-        apiKey: { type: 'apiKey', in: 'header', name: 'x-api-key' },
+        adminKey: { type: 'apiKey', in: 'header', name: 'x-admin-api-key' },
       },
     },
   });
@@ -2463,33 +2707,84 @@ app.get('/docs', (_req, res) => {
   res.type('html')
     .send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TON Escrow — API Docs</title><style>
   *{box-sizing:border-box}body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0e14;color:#e6e8eb}
-  a{color:#6aa8ff}header{padding:24px 20px;border-bottom:1px solid #1f2533;background:#0f131d;position:sticky;top:0}
+  a{color:#6aa8ff}header{padding:24px 20px;border-bottom:1px solid #1f2533;background:#0f131d;position:sticky;top:0;z-index:5}
   h1{margin:0;font-size:22px}h2{margin:28px 0 12px;font-size:18px;color:#8ab4ff}code{background:#1a2030;padding:2px 6px;border-radius:6px;font-size:13px}
-  .wrap{max-width:1080px;margin:0 auto;padding:20px}table{width:100%;border-collapse:collapse;background:#111827;border:1px solid #1f2533;border-radius:10px;overflow:hidden}
-  th,td{padding:10px 12px;border-bottom:1px solid #1f2533;text-align:left;font-size:14px}th{background:#0f131d;color:#8ab4ff}tr:last-child td{border-bottom:none}
-  .tag{padding:2px 8px;border-radius:999px;font-size:12px;background:#1a2030;border:1px solid #2a3550}
-  .auth-public{color:#7dd3a5}.auth-Identity{color:#f0c27a}.auth-Admin{color:#ff8a8a}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}.tablewrap{overflow-x:auto;border:1px solid #1f2533;border-radius:10px}
+  table{width:100%;border-collapse:collapse;background:#111827;min-width:760px}
+  th,td{padding:10px 12px;border-bottom:1px solid #1f2533;text-align:left;font-size:14px;vertical-align:top}th{background:#0f131d;color:#8ab4ff;position:sticky;top:0}tr:last-child td{border-bottom:none}
+  th[scope="col"]{white-space:nowrap}
+  .tag{padding:2px 8px;border-radius:999px;font-size:12px;background:#1a2030;border:1px solid #2a3550;white-space:nowrap}
+  .auth-public{color:#7dd3a5}.auth-identity{color:#f0c27a}.auth-admin{color:#ff8a8a}
   pre{white-space:pre-wrap;background:#0f131d;border:1px solid #1f2533;padding:14px;border-radius:10px;overflow:auto}
+  #filter{width:100%;max-width:420px;padding:10px 12px;margin:0 0 12px;border-radius:10px;border:1px solid #2a3550;background:#0f131d;color:#e6e8eb;font-size:14px}
+  .copybtn{margin-left:8px;padding:2px 10px;border-radius:8px;border:1px solid #2a3550;background:#1a2030;color:#8ab4ff;cursor:pointer;font-size:12px}
+  .copybtn:active{transform:scale(.96)}
+  #errbar{display:none;background:#3a1414;border:1px solid #7a2a2a;padding:12px 14px;border-radius:10px;margin-bottom:12px}
+  #errbar a{color:#ffb4b4}
+  .count{opacity:.6;font-size:13px;margin:0 0 12px}
+  @media (prefers-color-scheme:light){body{background:#f4f6fa;color:#17202e}header{background:#fff}table{background:#fff}th{background:#eef2f8;color:#245}code{background:#e8edf5}pre{background:#fff}.tag{background:#eef2f8}}
   </style></head><body><header><div class="wrap"><h1>TON Escrow Bot — API Docs</h1><div style="opacity:.7;margin-top:6px">Base: <code>/api</code> · <a href="/api/swagger">Swagger UI</a> · <a href="/api/docs">/api/docs</a> (JSON) · <a href="/api/openapi.json">/api/openapi.json</a> · <a href="/api/info">/api/info</a></div></div></header><div class="wrap">
   <h2>Auth</h2><pre>${JSON.stringify(API_DOCS.auth, null, 2)}</pre>
   <h2>Rate limits</h2><p><code>${API_DOCS.rateLimits}</code></p>
-  <h2>Endpoints</h2><table><thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead><tbody id="rows"></tbody></table>
-  <h2>Internal services (docker network escrow-net, not published)</h2><pre id="internal"></pre>
+  <h2>Endpoints</h2>
+  <div id="errbar" role="alert"></div>
+  <input id="filter" type="search" placeholder="Filter endpoints… (e.g. approve, channel, utrade)" aria-label="Filter endpoints">
+  <p class="count" id="count" aria-live="polite"></p>
+  <div class="tablewrap"><table><thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Auth</th><th scope="col">Description</th><th scope="col">Errors</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <h2>Internal services (docker network, not published)</h2><pre id="internal"></pre>
   <h2>Headers</h2><pre id="headers"></pre>
   <h2>Try</h2><p>Health: <code>curl http://localhost:3000/api/info</code> · Docs JSON: <code>curl http://localhost:3000/api/docs</code></p>
   <pre id="try"></pre>
   </div><script>
-  fetch('/api/docs').then(r=>r.json()).then(d=>{
-    const tbody=document.getElementById('rows');
-    for(const ep of d.endpoints){
-      const tr=document.createElement('tr');
-      tr.innerHTML='<td><code>'+ep.method+'</code></td><td><code>'+ep.path+'</code></td><td><span class="tag auth-'+ep.auth.split(/[ (]/)[0]+'">'+ep.auth+'</span></td><td>'+ep.desc+'</td>';
-      tbody.appendChild(tr);
+  function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function curlFor(ep){
+    var q = ep.method === 'GET' ? '' : " -X " + ep.method + " -H 'Content-Type: application/json' -d '{}'";
+    var auth = /^Admin/.test(ep.auth||'') ? ' -H "x-admin-api-key: $ADMIN_API_KEY"' : ' -H "x-init-data: $INIT_DATA"';
+    return 'curl' + auth + q + ' http://localhost:3000' + ep.path;
+  }
+  function anchorFor(ep){return (ep.method + '-' + ep.path).toLowerCase().replace(/[^a-z0-9]+/g,'-');}
+  fetch('/api/docs').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(d){
+    var tbody=document.getElementById('rows');
+    var rows=d.endpoints.map(function(ep){
+      var tr=document.createElement('tr');
+      var badge=(ep.auth||'').split(/[ (]/)[0]||'misc';
+      tr.id=anchorFor(ep);
+      var tds='<td><code>'+esc(ep.method)+'</code></td>'
+        +'<td><code>'+esc(ep.path)+'</code> <button class="copybtn" data-curl="'+esc(curlFor(ep))+'">copy curl</button> <a href="#'+tr.id+'" title="link">#</a></td>'
+        +'<td><span class="tag auth-'+esc(badge.toLowerCase())+'">'+esc(ep.auth)+'</span></td>'
+        +'<td>'+esc(ep.desc)+'</td><td><code>'+esc(ep.errors||'—')+'</code></td>';
+      tr.innerHTML=tds;
+      return tr;
+    });
+    rows.forEach(function(tr){tbody.appendChild(tr);});
+    function applyFilter(){
+      var q=(document.getElementById('filter').value||'').toLowerCase().trim();
+      var n=0;
+      rows.forEach(function(tr){
+        var hit=!q||tr.textContent.toLowerCase().indexOf(q)!==-1;
+        tr.style.display=hit?'':'none';
+        if(hit)n++;
+      });
+      document.getElementById('count').textContent=n+' / '+rows.length+' endpoints';
+      if(location.hash){var el=document.querySelector(location.hash);if(el)el.scrollIntoView();}
     }
+    document.getElementById('filter').addEventListener('input',applyFilter);
+    applyFilter();
+    tbody.addEventListener('click',function(ev){
+      var b=ev.target&&ev.target.closest?ev.target.closest('.copybtn'):null;
+      if(!b)return;
+      var done=function(){b.textContent='copied';setTimeout(function(){b.textContent='copy curl';},1200);};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(b.getAttribute('data-curl')).then(done,done);}
+      else{done();}
+    });
     document.getElementById('internal').textContent=JSON.stringify(d.internalServices,null,2);
     document.getElementById('headers').textContent=JSON.stringify(d.headers,null,2);
-    document.getElementById('try').textContent='curl -H "x-api-key: $API_KEY" http://localhost:3000/api/deals/mine\\n\\n# with Telegram initData (Mini App):\\ncurl -H "x-init-data: $INIT_DATA" -H "x-telegram-user-id: 123" http://localhost:3000/api/deals';
-  }).catch(e=>{document.body.innerHTML+='<pre>'+e+'</pre>'});
+    document.getElementById('try').textContent='curl http://localhost:3000/api/info\\n\\n# Mini App identity (x-init-data from Telegram.WebApp):\\ncurl -H "x-init-data: $INIT_DATA" http://localhost:3000/api/deals/mine\\n\\n# operator admin (never the shared x-api-key):\\ncurl -H "x-admin-api-key: $ADMIN_API_KEY" http://localhost:3000/api/admin/stuck';
+  }).catch(function(e){
+    var bar=document.getElementById('errbar');
+    bar.style.display='block';
+    bar.innerHTML='Could not load <code>/api/docs</code>: '+esc(e&&e.message||e)+' — <a href="/api/docs">open raw JSON</a> or <a href="#" onclick="location.reload();return false;">retry</a>.';
+  });
   </script></body></html>`);
 });
 
@@ -2544,9 +2839,24 @@ function isDisputedDeal(d: any): boolean {
   }
 }
 
-/** Schedulers: expiry + reminders, every 5 min, unref'd. */
+/** Schedulers: expiry + reminders, every 5 min, unref'd. Idempotent (safe to call twice, e.g. background DB retry). */
+let schedulersStarted = false;
 function startSchedulers() {
+  if (schedulersStarted) {
+    logger.warn('startSchedulers called twice — ignoring (timers already running)');
+    return;
+  }
+  schedulersStarted = true;
+  // Single-flight: a slow tick (100 deals x on-chain RPCs + sends) must never
+  // overlap the next one — overlapping ticks double-sent underpay refunds and
+  // raced the guarded close in the past.
+  let running = false;
   const run = async () => {
+    if (running) {
+      logger.warn('scheduler tick skipped: previous tick still running (single-flight)');
+      return;
+    }
+    running = true;
     try {
       // (a) close AWAITING_DEPOSIT older than 10h (fixed deal lifetime).
       // The full deal record (deal, messages, parties) stays in the DB — only
@@ -2554,8 +2864,10 @@ function startSchedulers() {
       // shows "Yopildi" while nothing is deleted from the server.
       try {
         // P2-10: respect user-facing deadline — expire if either 10h elapsed OR deadline passed (earlier wins, safer).
+        // Disputed deals are filtered in SQL (not just skipped in JS) so a
+        // crowded head of disputed rows can never starve later rows past LIMIT.
         const old = await db.query(
-          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND (created_at < now() - interval '10 hours' OR (deadline IS NOT NULL AND deadline < now())) LIMIT 100`,
+          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND (created_at < now() - interval '10 hours' OR (deadline IS NOT NULL AND deadline < now())) AND (confirmations->>'disputed' IS NULL OR confirmations->>'disputed' != 'true') ORDER BY id ASC LIMIT 100`,
         );
         for (const d of old.rows) {
           if (isDisputedDeal(d)) continue;
@@ -2570,7 +2882,14 @@ function startSchedulers() {
               continue;
             }
             // P1-4: before DB-only close, check on-chain for missed deposit
-            let missed: { found: boolean; txHash?: string } = { found: false };
+            let missed: {
+              found: boolean;
+              txHash?: string;
+              src?: string;
+              txSrc?: string;
+              kind?: 'TON' | 'JETTON';
+              via?: 'token' | 'legacy';
+            } = { found: false };
             try {
               const { checkMissedDepositOnChain } = await import('./blockchain/listener');
               missed = await checkMissedDepositOnChain(d as unknown as import('./blockchain/listener').DealRow);
@@ -2578,19 +2897,92 @@ function startSchedulers() {
               logger.warn(`missed deposit check failed for deal #${sanitizeLogValue(d.id)}`, e);
             }
             if (missed.found) {
-              // Real funds exist — route through deposit-confirm + on-chain refund, not bare DB close
+              // Real funds exist — route through deposit-confirm + on-chain refund, not bare DB close.
+              // For JETTON legs the missed check also returns the notifying wallet:
+              // a forged-master notification must never confirm (same rule as live).
+              if (missed.kind === 'JETTON' && missed.txSrc) {
+                try {
+                  const { expectedJettonWalletForPayment } = await import('./blockchain/listener');
+                  const expectedWallet = await expectedJettonWalletForPayment(String(d.payment_address || ''));
+                  if (expectedWallet) {
+                    const { Address } = await import('@ton/core');
+                    let same = false;
+                    try {
+                      same = Address.parse(missed.txSrc).toRawString() === expectedWallet.toRawString();
+                    } catch {
+                      same = false;
+                    }
+                    if (!same) {
+                      try {
+                        const { saveAdminAlert } = await import('./db/queries');
+                        await saveAdminAlert(
+                          'jetton_master_mismatch',
+                          `Deal #${d.id} missed-check hit from unexpected jetton wallet ${missed.txSrc} — ignored, NOT confirmed`,
+                          { dealId: Number(d.id), txHash: missed.txHash, actual: missed.txSrc },
+                        );
+                      } catch {}
+                      missed = { found: false };
+                    }
+                  }
+                } catch (e) {
+                  logger.warn(`missed jetton-master check failed for deal #${sanitizeLogValue(d.id)}`, e);
+                }
+              }
+              // Legacy escrow#<id> memos are guessable: on a token-issued deal a
+              // legacy match is a stale client or a front-run grief probe (it
+              // would CONFIRM the deal and strand the victim's real deposit).
+              // Same rule as the live path: hold unless the sender provably
+              // matches a KNOWN buyer expectation.
+              if (missed.found && missed.via === 'legacy') {
+                const tok = d.deposit_token ? String(d.deposit_token).trim().toLowerCase() : '';
+                const { isDepositTokenFormat } = await import('./utils/comments');
+                if (tok && isDepositTokenFormat(tok)) {
+                  let proven = false;
+                  try {
+                    const { isSenderMismatch } = await import('./blockchain/listener');
+                    const { Address } = await import('@ton/core');
+                    const srcAddr = missed.src ? Address.parse(missed.src) : null;
+                    const expKnown = !!(d.buyer_expected_address || String(d.buyer_expected_address || '').trim());
+                    if (srcAddr && expKnown) proven = !(await isSenderMismatch(d as never, srcAddr));
+                    // Fall back to users.ton_address like the live check does.
+                    if (!proven && srcAddr && d.buyer_telegram_id != null) {
+                      const u = await db.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [
+                        Number(d.buyer_telegram_id),
+                      ]);
+                      if (u.rows[0]?.ton_address) proven = !(await isSenderMismatch(d as never, srcAddr));
+                    }
+                  } catch (e) {
+                    logger.warn(`missed sender gate failed for deal #${sanitizeLogValue(d.id)}`, e);
+                  }
+                  if (!proven) {
+                    try {
+                      const { saveAdminAlert } = await import('./db/queries');
+                      await saveAdminAlert(
+                        'legacy_memo_hold',
+                        `Deal #${d.id} expiry missed-check hit legacy memo without proven sender — held for manual review, NOT auto-confirmed`,
+                        { dealId: Number(d.id), txHash: missed.txHash },
+                      );
+                    } catch {}
+                    missed = { found: false };
+                  }
+                }
+              }
+            }
+            if (missed.found) {
               try {
                 // Confirm deposit first (guarded)
                 const confirmed = await updateDealStatus(Number(d.id), 'DEPOSIT_CONFIRMED', missed.txHash, [
                   'AWAITING_DEPOSIT',
                 ]);
                 if (confirmed) {
+                  let refundOk = false;
                   try {
                     const { adminRefund } = await import('./services/escrowService');
                     const refundRes = await adminRefund(
                       (config.adminTelegramIds[0] || 0) as unknown as number,
                       Number(d.id),
                     );
+                    refundOk = !!(refundRes as { success?: boolean }).success;
                     logger.info(
                       `expiry: deal #${sanitizeLogValue(d.id)} had missed deposit ${missed.txHash}, refund attempted: ${JSON.stringify(refundRes).slice(0, 200)}`,
                     );
@@ -2602,7 +2994,7 @@ function startSchedulers() {
                         {
                           dealId: Number(d.id),
                           txHash: missed.txHash,
-                          refundOk: (refundRes as { success?: boolean }).success,
+                          refundOk,
                         },
                       );
                     } catch {}
@@ -2621,24 +3013,65 @@ function startSchedulers() {
                       );
                     } catch {}
                   }
+                  if (!refundOk) {
+                    // S3 fix: a CONFIRMED-but-unrefunded deal is invisible to every
+                    // scheduler (expiry selects AWAITING only, stuck selects PENDING
+                    // only). Roll back to AWAITING so the next tick retries the
+                    // refund instead of stranding funds in a dead status.
+                    try {
+                      await db.query(
+                        `UPDATE deals SET status = 'AWAITING_DEPOSIT', confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"missed_refund_failed":true}'::jsonb, updated_at = now() WHERE id = $1 AND status = 'DEPOSIT_CONFIRMED'`,
+                        [Number(d.id)],
+                      );
+                    } catch {}
+                  }
                   continue; // do not do DB-only close
                 }
               } catch (e) {
                 logger.warn(`missed deposit handling failed for deal #${sanitizeLogValue(d.id)}`, e);
               }
             }
-            // P5-15: underpay auto-refund — wire captured sender address into expiry
+            // P5-15: underpay auto-refund — wire captured sender addresses into expiry.
+            // The deal is closed below ONLY when there is nothing pending to
+            // refund, or the refund succeeded. A failed refund keeps the deal
+            // OPEN (with hourly backoff inside tryRefundUnderpay) so funds are
+            // never stranded by a DB-only close.
+            let underpayPending = false;
             try {
               const { tryRefundUnderpay } = await import('./services/escrowService');
-              await tryRefundUnderpay(
+              const ures = await tryRefundUnderpay(
                 d as unknown as {
                   id: number | string;
                   asset?: string | null;
                   confirmations?: Record<string, unknown> | null;
                 },
               );
+              underpayPending = ures.hasPendingUnderpay && !ures.refundSucceeded;
             } catch (e) {
               logger.warn(`underpay auto-refund failed for deal #${d.id}`, e);
+              underpayPending = true;
+            }
+            if (underpayPending) {
+              logger.warn(
+                `expiry: deal #${sanitizeLogValue(d.id)} has unrefunded underpay — keeping OPEN, retry later`,
+              );
+              continue;
+            }
+            // S2 window: a deposit may have landed between the missed-check (or
+            // the underpay refund sends) above and this close. Re-check on-chain
+            // right before the guarded close; a late hit defers to next tick's
+            // confirm+refund path instead of stranding funds in a closed deal.
+            try {
+              const { checkMissedDepositOnChain } = await import('./blockchain/listener');
+              const late = await checkMissedDepositOnChain(d as unknown as import('./blockchain/listener').DealRow);
+              if (late.found) {
+                logger.info(
+                  `expiry: deal #${sanitizeLogValue(d.id)} late deposit ${late.txHash} appeared before close — deferring to confirm+refund path`,
+                );
+                continue;
+              }
+            } catch (e) {
+              logger.warn(`late deposit re-check failed for deal #${sanitizeLogValue(d.id)}`, e);
             }
             // P1-3: use guarded update for EXPIRE (same validation as assert above)
             const client = await db.connect();
@@ -2733,7 +3166,7 @@ function startSchedulers() {
       try {
         const q2 = await db.query(
           `SELECT * FROM deals WHERE status = 'DEPOSIT_CONFIRMED'
-           AND created_at < now() - interval '3 hours'
+           AND updated_at < now() - interval '3 hours'
            AND (confirmations->>'remShip' IS NULL OR confirmations->>'remShip' != 'true')
            AND (confirmations->>'disputed' IS NULL OR confirmations->>'disputed' != 'true')
            LIMIT 100`,
@@ -2759,7 +3192,7 @@ function startSchedulers() {
       try {
         const q3 = await db.query(
           `SELECT * FROM deals WHERE status = 'ITEM_SENT'
-           AND created_at < now() - interval '3 hours'
+           AND updated_at < now() - interval '3 hours'
            AND (confirmations->>'remConfirm' IS NULL OR confirmations->>'remConfirm' != 'true')
            AND (confirmations->>'disputed' IS NULL OR confirmations->>'disputed' != 'true')
            LIMIT 100`,
@@ -2786,7 +3219,8 @@ function startSchedulers() {
         const stall = await db.query(
           `SELECT * FROM deals WHERE deal_type IN ('CHANNEL','GROUP')
             AND status = 'DEPOSIT_CONFIRMED' AND transfer_to_escrow_at IS NULL
-            AND created_at < now() - interval '6 hours' LIMIT 100`,
+            AND updated_at < now() - interval '6 hours'
+            AND (confirmations->>'stallAlerted' IS NULL OR confirmations->>'stallAlerted' != 'true') LIMIT 100`,
         );
         for (const d of stall.rows) {
           try {
@@ -2799,6 +3233,14 @@ function startSchedulers() {
                 channelUsername: d.channel_username,
               },
             );
+            // Mark alerted: without this the same deal spams admins + both
+            // parties every 5-min tick forever.
+            try {
+              await db.query(
+                `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"stallAlerted":true}'::jsonb, updated_at = now() WHERE id = $1`,
+                [d.id],
+              );
+            } catch {}
             const like = dealLikeForNotify(d);
             if (d.buyer_telegram_id)
               try {
@@ -2825,6 +3267,8 @@ function startSchedulers() {
       }
     } catch (e) {
       logger.warn('scheduler run failed', e);
+    } finally {
+      running = false;
     }
   };
   const timer = setInterval(
@@ -2851,8 +3295,17 @@ function startSchedulers() {
   (stuckTimer as unknown as { unref?: () => void }).unref?.();
 
   // P1-5: auto-retry fee legs every 30 min (bounded 5 attempts, escalating alerts)
+  // Single-flight like the main tick (20 deals x on-chain sends can overlap).
+  // Claim races between this loop and manual admin retry are settled atomically
+  // inside retryFeePayout (losers get retry_busy_or_exhausted).
+  let feeRunning = false;
   const feeTimer = setInterval(
     async () => {
+      if (feeRunning) {
+        logger.warn('fee retry tick skipped: previous tick still running (single-flight)');
+        return;
+      }
+      feeRunning = true;
       try {
         const { listFeeFailedDeals, retryFeePayout } = await import('./services/escrowService');
         const fails = (await listFeeFailedDeals(20)) as Array<{ id: number; fee_retry_count?: number }>;
@@ -2868,6 +3321,8 @@ function startSchedulers() {
         }
       } catch (e) {
         logger.warn('fee auto-retry failed', e);
+      } finally {
+        feeRunning = false;
       }
     },
     30 * 60 * 1000,
@@ -2967,7 +3422,7 @@ boot().catch((err) => {
     }
     try {
       await connectDB();
-      logger.info('Background DB retry succeeded — starting bot/listener');
+      logger.info('Background DB retry succeeded — starting bot/listener/schedulers');
       clearInterval(bgRetry);
       if (config.botToken && !getBot()) {
         try {
@@ -2981,6 +3436,14 @@ boot().catch((err) => {
         await startListener();
       } catch (e) {
         logger.warn('Background listener start failed', e);
+      }
+      // S9 fix: schedulers (expiry/refunds/reminders) must also start here —
+      // otherwise a DB hiccup at boot silently disables all money-safety
+      // timers until the next process restart. startSchedulers is idempotent.
+      try {
+        startSchedulers();
+      } catch (e) {
+        logger.warn('Background scheduler start failed', e);
       }
     } catch {
       // keep retrying

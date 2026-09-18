@@ -327,18 +327,39 @@ export async function retryFeePayout(dealId: number): Promise<{ ok: boolean; err
   const deal = await getDealById(dealId);
   if (!deal) return { ok: false, error: 'deal_not_found' };
   if (!deal.fee_payout_failed) return { ok: false, error: 'no_fee_failure' };
-  const feeRetryCount = Number((deal as unknown as { fee_retry_count?: unknown }).fee_retry_count ?? 0);
-  if (feeRetryCount >= 5) return { ok: false, error: 'retry_exhausted: max 5 attempts' };
   const assetUpper = String(deal.asset || 'TON').toUpperCase();
   const amountStr = String(deal.amount ?? '0');
   const feeBps = Number((deal as unknown as { fee_bps?: unknown }).fee_bps ?? config.feeBps ?? 100);
-  const { feeBase, feeHuman } = feeParts(amountStr, assetUpper, feeBps);
+  let feeBase: bigint;
+  let feeHuman: string;
+  try {
+    ({ feeBase, feeHuman } = feeParts(amountStr, assetUpper, feeBps));
+  } catch (e) {
+    return { ok: false, error: `invalid_amount_or_asset: ${String((e as Error).message || e)}` };
+  }
   if (feeBase <= 0n || !config.feeAddress || feeHuman === '0') {
     return { ok: false, error: 'no_fee_to_retry' };
   }
-  const idemKey = `${payoutIdempotencyKey(dealId, DEAL_STATUS.RELEASED)}:fee:retry:${feeRetryCount + 1}`;
+  // Atomic claim: scheduler loop and manual admin retry race here. Exactly one
+  // worker wins the increment (bounded 5); losers back off. The read-then-send
+  // pattern used to let two workers broadcast the same fee leg concurrently.
+  const claim = await db
+    .query(
+      `UPDATE deals SET fee_retry_count = COALESCE(fee_retry_count,0)+1, fee_last_retry_at = now(), updated_at = now()
+       WHERE id = $1 AND fee_payout_failed = true AND COALESCE(fee_retry_count,0) < 5
+       RETURNING fee_retry_count`,
+      [dealId],
+    )
+    .catch(() => null);
+  if (!claim || (claim.rowCount ?? 0) === 0) return { ok: false, error: 'retry_busy_or_exhausted' };
+  const attempt = Number(claim.rows[0]?.fee_retry_count ?? 0);
+  // STABLE key identical to the original fee leg (`release:<id>:fee`): if a
+  // previous attempt broadcast but its response was lost, the signer dedupes
+  // this retry instead of paying the fee twice. Rotating :retry:N keys
+  // defeated that dedupe (up to 5 fee payouts).
+  const idemKey = `${payoutIdempotencyKey(dealId, DEAL_STATUS.RELEASED)}:fee`;
   try {
-    const memo = encryptField(`Fee for Escrow #${dealId} — ${feeHuman} ${assetUpper} (retry ${feeRetryCount + 1})`);
+    const memo = encryptField(`Fee for Escrow #${dealId} — ${feeHuman} ${assetUpper} (retry ${attempt})`);
     if (assetUpper === 'TON') {
       await sendTon({ to: config.feeAddress, value: feeHuman, comment: memo, bounce: false, idempotencyKey: idemKey });
     } else {
@@ -354,36 +375,33 @@ export async function retryFeePayout(dealId: number): Promise<{ ok: boolean; err
       });
     }
     await db.query(
-      `UPDATE deals SET fee_payout_failed = false, fee_payout_error = null, fee_retry_count = COALESCE(fee_retry_count,0)+1, fee_last_retry_at = now(), updated_at = now() WHERE id = $1`,
+      `UPDATE deals SET fee_payout_failed = false, fee_payout_error = null, updated_at = now() WHERE id = $1`,
       [dealId],
     );
     try {
       const { saveAdminAlert } = await import('../db/queries');
       await saveAdminAlert(
         'fee_retry_success',
-        `Deal #${dealId} fee retry ${feeRetryCount + 1} succeeded: ${feeHuman} ${assetUpper} to ${config.feeAddress}`,
-        { dealId, feeHuman, asset: assetUpper, retry: feeRetryCount + 1 },
+        `Deal #${dealId} fee retry ${attempt} succeeded: ${feeHuman} ${assetUpper} to ${config.feeAddress}`,
+        { dealId, feeHuman, asset: assetUpper, retry: attempt },
       );
     } catch {}
     return { ok: true };
   } catch (e) {
     const msg = String((e as Error).message || e).slice(0, 500);
-    await db.query(
-      `UPDATE deals SET fee_retry_count = COALESCE(fee_retry_count,0)+1, fee_last_retry_at = now(), fee_payout_error = $1, updated_at = now() WHERE id = $2`,
-      [msg, dealId],
-    );
+    await db.query(`UPDATE deals SET fee_payout_error = $1, updated_at = now() WHERE id = $2`, [msg, dealId]);
     try {
       const { saveAdminAlert } = await import('../db/queries');
-      const severity = feeRetryCount + 1 >= 3 ? 'fee_retry_failed_escalated' : 'fee_retry_failed';
-      await saveAdminAlert(severity, `Deal #${dealId} fee retry ${feeRetryCount + 1} failed: ${msg}`, {
+      const severity = attempt >= 3 ? 'fee_retry_failed_escalated' : 'fee_retry_failed';
+      await saveAdminAlert(severity, `Deal #${dealId} fee retry ${attempt} failed: ${msg}`, {
         dealId,
         feeHuman,
         asset: assetUpper,
-        retry: feeRetryCount + 1,
+        retry: attempt,
         error: msg,
       });
     } catch {}
-    await notifyAdminsHub(`Deal #${dealId} fee retry ${feeRetryCount + 1} failed: ${msg}`, feeHuman, assetUpper);
+    await notifyAdminsHub(`Deal #${dealId} fee retry ${attempt} failed: ${msg}`, feeHuman, assetUpper);
     return { ok: false, error: msg };
   }
 }
@@ -401,77 +419,177 @@ export async function listFeeFailedDeals(limit = 100): Promise<unknown[]> {
   }
 }
 
+/** Hours between underpay-refund attempts; max attempts before giving up retries (deal stays open for manual handling). */
+export const UNDERPAY_RETRY_COOLDOWN_MS = 60 * 60 * 1000;
+export const UNDERPAY_MAX_ATTEMPTS = 24;
+
+interface UnderpayEntry {
+  amount?: string;
+  src?: string;
+  tx?: string;
+  refunded?: boolean;
+}
+
 /**
- * P5-15: underpay auto-refund helper — wire captured underpay src into expiry.
- * Called by scheduler when an AWAITING_DEPOSIT deal with confirmations.underpay sits past timeout.
- * Validates amount/address, sends refund via signer with idempotency `underpay-refund:<id>`, alerts.
- * Returns {refundAttempted, refundSucceeded}.
+ * P5-15: underpay auto-refund helper — wire captured underpay srcs into expiry.
+ * Called by scheduler when an AWAITING_DEPOSIT deal with underpay data sits past timeout.
+ * Refunds EVERY captured partial payment (history array; legacy single object
+ * supported with its original stable key), validates amount/address, sends via
+ * signer with per-entry idempotency keys, alerts.
+ * Durable markers in confirmations (`underpay_refund.{attempts,last_at}` +
+ * per-entry `refunded` flags) make retries safe across ticks/restarts: repeats
+ * hit the same signer keys (deduped) and back off hourly.
+ * Returns {refundAttempted, refundSucceeded, hasPendingUnderpay}.
  */
 export async function tryRefundUnderpay(deal: {
   id: number | string;
   asset?: string | null;
   confirmations?: Record<string, unknown> | null;
-}): Promise<{ refundAttempted: boolean; refundSucceeded: boolean; error?: string }> {
-  const conf = (deal as unknown as { confirmations?: Record<string, unknown> }).confirmations as
-    { underpay?: { amount?: string; src?: string } } | undefined;
-  const up = conf?.underpay;
-  if (!up?.src || !up?.amount) return { refundAttempted: false, refundSucceeded: false };
-  const assetUpper = String(deal.asset || 'TON').toUpperCase();
-  const rawAmount = String(up.amount).trim();
-  const rawSrc = String(up.src).trim();
-  if (!rawAmount || !rawSrc) return { refundAttempted: false, refundSucceeded: false };
+}): Promise<{
+  refundAttempted: boolean;
+  refundSucceeded: boolean;
+  hasPendingUnderpay: boolean;
+  error?: string;
+}> {
+  const id = Number(deal.id);
+  // Fresh confirmations: the scheduler row may be stale (a parallel tick or
+  // the listener may have appended history after the row was read).
+  let conf: Record<string, unknown> = (deal.confirmations as Record<string, unknown>) || {};
   try {
-    // Validate address and amount
-    const { Address } = await import('@ton/core');
-    Address.parse(rawSrc);
-    const { toBaseUnits } = await import('../utils/money');
-    toBaseUnits(rawAmount, assetUpper);
-    const memo = encryptField(`Underpay refund Deal #${deal.id} — ${rawAmount} ${assetUpper}`);
-    if (assetUpper === 'TON') {
-      await sendTon({
-        to: rawSrc,
-        value: rawAmount,
-        comment: memo,
-        bounce: false,
-        idempotencyKey: `underpay-refund:${deal.id}`,
-      });
-    } else {
-      const master = config.jettonMasterAddress || config.usdtJettonAddress;
-      if (!master) throw new Error('jetton_master_not_configured');
-      await sendJetton({
-        jettonMasterAddress: master,
-        to: rawSrc,
-        amount: rawAmount,
-        forwardComment: memo,
-        forwardTonAmount: '0.01',
-        idempotencyKey: `underpay-refund:${deal.id}`,
-      });
+    const fresh = await db.query('SELECT confirmations FROM deals WHERE id = $1', [id]);
+    if (fresh.rows[0]?.confirmations && typeof fresh.rows[0].confirmations === 'object') {
+      conf = fresh.rows[0].confirmations as Record<string, unknown>;
     }
+  } catch {}
+  const history = Array.isArray((conf as { underpay_history?: unknown }).underpay_history)
+    ? ((conf as { underpay_history?: UnderpayEntry[] }).underpay_history as UnderpayEntry[])
+    : [];
+  const legacy = (conf as { underpay?: UnderpayEntry }).underpay;
+  const entries: UnderpayEntry[] = [...history];
+  // Legacy single-object entries (written before the history array existed)
+  // keep their ORIGINAL stable key so signer dedupe still protects repeats.
+  // Always included: if it was refunded pre-change, the same-key resend hits
+  // the signer dedupe (treated as success, then the marker is cleaned up).
+  if (legacy?.src && legacy?.amount) entries.push({ ...legacy });
+  const pending = entries.filter((e) => e && e.src && e.amount && e.refunded !== true);
+  if (!pending.length) return { refundAttempted: false, refundSucceeded: true, hasPendingUnderpay: false };
+
+  const state = (conf as { underpay_refund?: { attempts?: unknown; last_at?: unknown } }).underpay_refund;
+  const attempts = Number(state?.attempts ?? 0);
+  if (
+    attempts > 0 &&
+    state?.last_at &&
+    Date.now() - new Date(String(state.last_at)).getTime() < UNDERPAY_RETRY_COOLDOWN_MS
+  ) {
+    // Backoff: don't hammer the signer every 5-min tick for a failing refund.
+    return { refundAttempted: false, refundSucceeded: false, hasPendingUnderpay: true };
+  }
+  if (attempts >= UNDERPAY_MAX_ATTEMPTS) {
+    return {
+      refundAttempted: false,
+      refundSucceeded: false,
+      hasPendingUnderpay: true,
+      error: 'retry_exhausted: manual admin refund required',
+    };
+  }
+  // Record the attempt BEFORE sending: a crash mid-send retries after cooldown
+  // with identical keys (signer dedupes), never with fresh keys.
+  try {
+    await db.query(
+      `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay_refund', jsonb_build_object('attempts', $1::int, 'last_at', now()::text)) WHERE id = $2`,
+      [attempts + 1, id],
+    );
+  } catch {}
+
+  const assetUpper = String(deal.asset || 'TON').toUpperCase();
+  let allOk = true;
+  let firstErr = '';
+  const refundedKeys = new Set<string>();
+  for (const e of pending) {
+    const rawAmount = String(e.amount).trim();
+    const rawSrc = String(e.src).trim();
+    const txKey = e.tx && String(e.tx).trim() ? String(e.tx).trim() : 'legacy';
+    const idemKey = txKey === 'legacy' ? `underpay-refund:${id}` : `underpay-refund:${id}:${txKey}`;
+    try {
+      const { Address } = await import('@ton/core');
+      Address.parse(rawSrc);
+      const { toBaseUnits } = await import('../utils/money');
+      toBaseUnits(rawAmount, assetUpper);
+      const memo = encryptField(`Underpay refund Deal #${id} — ${rawAmount} ${assetUpper}`);
+      if (assetUpper === 'TON') {
+        await sendTon({ to: rawSrc, value: rawAmount, comment: memo, bounce: false, idempotencyKey: idemKey });
+      } else {
+        const master = config.jettonMasterAddress || config.usdtJettonAddress;
+        if (!master) throw new Error('jetton_master_not_configured');
+        await sendJetton({
+          jettonMasterAddress: master,
+          to: rawSrc,
+          amount: rawAmount,
+          forwardComment: memo,
+          forwardTonAmount: '0.01',
+          idempotencyKey: idemKey,
+        });
+      }
+      refundedKeys.add(txKey);
+    } catch (err) {
+      allOk = false;
+      const msg = String((err as Error).message || err).slice(0, 300);
+      if (!firstErr) firstErr = msg;
+      logger.warn(`Deal #${id}: underpay refund failed for entry tx=${txKey}`, err);
+    }
+  }
+
+  if (refundedKeys.size > 0) {
+    // Mark refunded entries so later ticks skip them (best-effort; per-entry
+    // signer keys already make repeats safe).
+    try {
+      const fresh = await db.query('SELECT confirmations FROM deals WHERE id = $1', [id]);
+      const c = (fresh.rows[0]?.confirmations || {}) as {
+        underpay_history?: UnderpayEntry[];
+        underpay?: UnderpayEntry;
+      };
+      let next: Record<string, unknown> = { ...(c as Record<string, unknown>) };
+      if (Array.isArray(next.underpay_history)) {
+        next = {
+          ...next,
+          underpay_history: (next.underpay_history as UnderpayEntry[]).map((h) => {
+            const k = h.tx && String(h.tx).trim() ? String(h.tx).trim() : 'legacy';
+            return refundedKeys.has(k) ? { ...h, refunded: true } : h;
+          }),
+        };
+      }
+      if ((next.underpay as UnderpayEntry | undefined)?.src && refundedKeys.has('legacy')) {
+        const { ...rest } = next;
+        delete (rest as Record<string, unknown>).underpay;
+        next = rest;
+      }
+      await db.query('UPDATE deals SET confirmations = $1::jsonb, updated_at = now() WHERE id = $2', [
+        JSON.stringify(next),
+        id,
+      ]);
+    } catch {}
     try {
       const { saveAdminAlert } = await import('../db/queries');
       await saveAdminAlert(
         'underpay_auto_refund',
-        `Deal #${deal.id} underpay ${rawAmount} ${assetUpper} refunded to ${rawSrc} after timeout`,
-        {
-          dealId: Number(deal.id),
-          amount: rawAmount,
-          asset: assetUpper,
-          src: rawSrc,
-        },
+        `Deal #${id} underpay refunded ${refundedKeys.size} entr${refundedKeys.size === 1 ? 'y' : 'ies'} after timeout`,
+        { dealId: id, entries: refundedKeys.size, asset: assetUpper },
       );
     } catch {}
-    return { refundAttempted: true, refundSucceeded: true };
-  } catch (e) {
-    const msg = String((e as Error).message || e).slice(0, 500);
+  }
+  if (!allOk) {
     try {
       const { saveAdminAlert } = await import('../db/queries');
-      await saveAdminAlert('underpay_auto_refund_failed', `Deal #${deal.id} underpay refund failed: ${msg}`, {
-        dealId: Number(deal.id),
-        error: msg,
+      const severity = attempts + 1 >= 6 ? 'underpay_auto_refund_failed_escalated' : 'underpay_auto_refund_failed';
+      await saveAdminAlert(severity, `Deal #${id} underpay refund failed (attempt ${attempts + 1}): ${firstErr}`, {
+        dealId: id,
+        error: firstErr,
+        attempt: attempts + 1,
       });
     } catch {}
-    return { refundAttempted: true, refundSucceeded: false, error: msg };
+    return { refundAttempted: true, refundSucceeded: false, hasPendingUnderpay: true, error: firstErr };
   }
+  return { refundAttempted: true, refundSucceeded: true, hasPendingUnderpay: false };
 }
 
 /**
@@ -524,12 +642,24 @@ export async function guardedTransition(
       throw new Error(`already_${String(status).toLowerCase()}: bitim allaqachon ${status} holatda`);
     }
     fromStatus = String(deal.status);
-    const asset = String(opts?.asset || deal.asset || 'TON').toUpperCase();
+    // Money math ALWAYS uses the locked row — never caller opts. A manipulated
+    // amount/asset here would mint money from the omnibus custody wallet
+    // (opts only ever carry toAddress/terms for legitimate callers).
+    if (opts?.amount != null && String(opts.amount) !== String(deal.amount ?? '')) {
+      logger.warn(`guardedTransition deal #${dealId}: opts.amount ignored (locked row wins)`);
+    }
+    if (opts?.asset != null && String(opts.asset).toUpperCase() !== String(deal.asset || 'TON').toUpperCase()) {
+      logger.warn(`guardedTransition deal #${dealId}: opts.asset ignored (locked row wins)`);
+    }
+    const asset = String(deal.asset || 'TON').toUpperCase();
     const assetUpper = asset;
-    const amountStr = String(opts?.amount ?? deal.amount ?? 0);
-    const terms = String(opts?.terms || deal.terms || '');
+    const amountStr = String(deal.amount ?? '0');
+    const terms = String(opts?.terms ?? deal.terms ?? '');
 
     // Fee: seller net = amount (price), fee = amount * feeBps / 10000.
+    // Fail CLOSED on pricing errors: falling back to the raw amount would
+    // commit a PENDING payout for an unvalidated (possibly zero/negative or
+    // wrong-asset) principal.
     let payoutHuman = amountStr;
     let feeHuman = fromBaseUnits(0n, assetUpper);
     let feeBase = 0n;
@@ -545,8 +675,10 @@ export async function guardedTransition(
         feeBase = parts.feeBase;
         if (payoutHuman === '0' || payoutHuman === '-0') payoutHuman = amountStr;
       } catch (e) {
-        logger.warn(`Fee calc failed for deal #${dealId}`, e);
-        payoutHuman = amountStr;
+        await client.query('ROLLBACK');
+        throw new Error(
+          `invalid_amount_or_asset: fee calc failed for deal #${dealId}: ${String((e as Error).message || e)}`,
+        );
       }
     } else if (isRefund) {
       // REFUND: the buyer deposited price+fee (listener confirms only exact
@@ -562,8 +694,10 @@ export async function guardedTransition(
         payoutHuman = fromBaseUnits(pricing.expectedDeposit, assetUpper);
         if (payoutHuman === '0' || payoutHuman === '-0') payoutHuman = amountStr;
       } catch (e) {
-        logger.warn(`Refund calc failed for deal #${dealId}`, e);
-        payoutHuman = amountStr;
+        await client.query('ROLLBACK');
+        throw new Error(
+          `invalid_amount_or_asset: refund calc failed for deal #${dealId}: ${String((e as Error).message || e)}`,
+        );
       }
     }
 
@@ -588,6 +722,27 @@ export async function guardedTransition(
         throw new Error(`buyer_ton_address_required: xaridor TON manzili yo'q, ilovada kiriting`);
       }
       throw new Error(`payout_address_required`);
+    }
+
+    // Pre-PENDING validation: never commit a payout attempt for an unparsable
+    // destination or a non-positive principal. A zero-value "payout" would
+    // finalize RELEASED/REFUNDED without moving funds (deal burned); a garbage
+    // address would burn the send in a bounce:false transfer.
+    try {
+      const { Address } = await import('@ton/core');
+      Address.parse(toAddress);
+    } catch {
+      await client.query('ROLLBACK');
+      throw new Error(`invalid_payout_address: destination failed TON address parse for deal #${dealId}`);
+    }
+    try {
+      const { toBaseUnits } = await import('../utils/money');
+      if (BigInt(toBaseUnits(payoutHuman, assetUpper)) <= 0n) throw new Error('non-positive');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw new Error(
+        `invalid_amount: non-positive or unparsable payout principal for deal #${dealId}: ${String((e as Error).message || e)}`,
+      );
     }
 
     plan = {
@@ -963,7 +1118,12 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
       feeHuman = parts.feeHuman;
       feeBase = parts.feeBase;
     } catch (e) {
-      logger.warn(`Fee calc failed for deal #${id}`, e);
+      // Fail closed like guardedTransition: never commit PENDING on unvalidated money.
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `invalid_amount_or_asset: fee calc failed for deal #${id}: ${String((e as Error).message || e)}`,
+      };
     }
 
     const payoutAddress = await resolvePayoutAddress(
@@ -1004,6 +1164,26 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
     let memoPlain = memoPlainBase;
     if (memoPlain.length > 120) memoPlain = memoPlain.slice(0, 119) + '…';
     const encryptedMemo = encryptField(memoPlain);
+
+    // Pre-PENDING validation (same rule as guardedTransition): parsable
+    // destination + positive principal, or no payout attempt is committed.
+    try {
+      const { Address } = await import('@ton/core');
+      Address.parse(payoutAddress);
+    } catch {
+      await client.query('ROLLBACK');
+      return { success: false, message: `invalid_payout_address: seller destination failed TON parse` };
+    }
+    try {
+      const { toBaseUnits } = await import('../utils/money');
+      if (BigInt(toBaseUnits(sellerHuman, assetUpper)) <= 0n) throw new Error('non-positive');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `invalid_amount: non-positive payout principal: ${String((e as Error).message || e)}`,
+      };
+    }
 
     plan = {
       assetUpper,
@@ -1334,9 +1514,28 @@ export async function requestTransferToEscrow(
 }
 
 export async function confirmTransferToEscrow(
-  _sellerTelegramId: number,
+  sellerTelegramId: number,
   dealId: number | string,
 ): Promise<{ ok: boolean; verified?: boolean; message?: string; error?: string }> {
+  // Defense in depth (route already gates isSeller||admin): never confirm for
+  // a stranger, and never touch a deal whose money already moved — a late
+  // confirm would otherwise rewrite transfer_to_escrow_at post-final.
+  const deal: any = await getDealById(Number(dealId));
+  if (!deal) return { ok: false, error: 'deal_not_found' };
+  if (!isChannelDeal(deal)) return { ok: false, error: 'not_channel_deal' };
+  // Service-level caller check (route enforces isSeller||admin too): the
+  // deal's seller, or a configured admin id (operator confirm path).
+  if (
+    sellerTelegramId != null &&
+    Number(deal.seller_telegram_id) !== Number(sellerTelegramId) &&
+    !isAdmin(Number(sellerTelegramId))
+  ) {
+    return { ok: false, error: 'only_seller_can_confirm' };
+  }
+  const st = String(deal.status || '').toUpperCase();
+  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(st)) {
+    return { ok: false, error: `deal_finished: cannot confirm escrow on ${st} deal` };
+  }
   const res = await checkEscrowHolderOwnership(dealId);
   if (!res.ok) return { ok: false, error: res.error };
   if (!res.isEscrowOwner)
@@ -1358,6 +1557,35 @@ export async function payoutSellerForChannel(
   if (!deal.transfer_to_escrow_at) return { success: false, error: 'escrow_not_yet_received' };
   if (String(deal.status) === DEAL_STATUS.RELEASED || String(deal.status) === DEAL_STATUS.REFUNDED)
     return { success: false, error: `already_${String(deal.status).toLowerCase()}` };
+  // FRESH custody re-verification: the timestamp only proves escrow held the
+  // channel AT CONFIRM TIME. A seller who reclaimed it since (Telegram client,
+  // no code involved) must not be paid while keeping the channel. On failure
+  // the stale flag is cleared so it can never authorize a future payout.
+  try {
+    const custody = await checkEscrowHolderOwnership(Number(dealId));
+    if (!custody.ok || !custody.isEscrowOwner) {
+      try {
+        await db.query(`UPDATE deals SET transfer_to_escrow_at = NULL, updated_at = now() WHERE id = $1`, [
+          Number(dealId),
+        ]);
+      } catch {}
+      const detail = !custody.ok
+        ? custody.error
+        : `current creator ${custody.currentCreatorId} != escrow ${ESCROW_HOLDER_ID}`;
+      const msg = `escrow_custody_lost: ${detail} — seller must re-transfer the channel to ${ESCROW_HOLDER_USERNAME} before payout`;
+      logger.warn(`payoutSellerForChannel deal #${dealId}: ${msg}`);
+      try {
+        const { saveAdminAlert } = await import('../db/queries');
+        await saveAdminAlert('escrow_custody_lost', `Deal #${dealId}: ${msg}`, {
+          dealId: Number(dealId),
+          currentCreatorId: custody.currentCreatorId ?? null,
+        });
+      } catch {}
+      return { success: false, error: msg };
+    }
+  } catch (e) {
+    return { success: false, error: `custody_check_failed: ${String((e as Error).message || e)}` };
+  }
   try {
     await guardedTransition(Number(dealId), DEAL_STATUS.RELEASED, {
       amount: deal.amount,
@@ -1393,8 +1621,14 @@ export async function transferChannelToBuyer(
   const raw = String(newOwnerUsername).trim().replace(/^@/, '');
   if (!raw || !/^([A-Za-z0-9_]{4,32})$/.test(raw)) return { ok: false, error: 'invalid_username' };
   const target = '@' + raw;
+  // GROUP deals invite through the group endpoint (channel invite on a basic
+  // group forces a migrate round-trip and mis-reports membership errors).
+  const invitePath =
+    String(deal.deal_type).toUpperCase() === 'GROUP'
+      ? `/group/${encodeURIComponent(String(channelId))}/invite`
+      : `/channel/${encodeURIComponent(String(channelId))}/invite`;
   try {
-    await ubotFetch(`/channel/${encodeURIComponent(String(channelId))}/invite`, {
+    await ubotFetch(invitePath, {
       method: 'POST',
       body: JSON.stringify({ userId: target }),
     });

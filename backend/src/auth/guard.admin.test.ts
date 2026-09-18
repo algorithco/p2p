@@ -12,7 +12,7 @@ vi.mock('../config', () => ({
   },
 }));
 
-import { requireAdmin } from './guard';
+import { requireAdmin, getIdentityId } from './guard';
 
 function mockReq(headers: Record<string, string> = {}, user?: { id: number }): Request {
   return {
@@ -87,5 +87,24 @@ describe('P0-2 requireAdmin with scoped keys', () => {
     const next = vi.fn();
     requireAdmin(req, res, next as NextFunction);
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe('getIdentityId never trusts self-asserted ids', () => {
+  function apiKeyReq(body: unknown): Request {
+    return { headers: {}, authMode: 'api-key', body } as unknown as Request;
+  }
+
+  it('ignores body.telegramId under api-key (was full impersonation)', () => {
+    expect(getIdentityId(apiKeyReq({ telegramId: 222 }))).toBeNull();
+  });
+
+  it('ignores body.senderTelegramId-shaped payloads too', () => {
+    expect(getIdentityId(apiKeyReq({ telegramId: 111, senderTelegramId: 111 }))).toBeNull();
+  });
+
+  it('verified user id still wins', () => {
+    const req = { headers: {}, user: { id: 111 }, authMode: 'telegram' } as unknown as Request;
+    expect(getIdentityId(req)).toBe(111);
   });
 });
