@@ -111,9 +111,8 @@ export async function createDealRecord(params: {
   depositToken?: string | null;
   buyerExpectedAddress?: string | null;
 }) {
+  // P2-9: legacy buyerId/sellerId params intentionally ignored (never read, stored NULL).
   const {
-    buyerId = null,
-    sellerId = null,
     buyerTelegramId = null,
     sellerTelegramId = null,
     asset,
@@ -186,8 +185,8 @@ export async function createDealRecord(params: {
         buyer_expected_address
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22) RETURNING *`,
     [
-      buyerId,
-      sellerId,
+      null,
+      null,
       buyerTelegramId,
       sellerTelegramId,
       asset,
