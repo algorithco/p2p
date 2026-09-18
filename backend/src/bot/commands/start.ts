@@ -39,6 +39,13 @@ export function registerCommands(bot: Bot) {
       if (sep !== -1) {
         const dealId = rest.slice(0, sep);
         const token = rest.slice(sep + 1);
+        // Validate before reflecting into URLs/replies: Telegram start payloads
+        // are attacker-craftable (t.me/<bot>?start=join_...). Reject junk so a
+        // malicious payload can never reach the Mini App fragment path raw.
+        if (!/^\d{1,10}$/.test(dealId) || !/^[A-Za-z0-9_-]{10,128}$/.test(token)) {
+          await ctx.reply(`Taklif havolasi buzilgan — yangisini so'rang.`);
+          return;
+        }
         const base = (config.webappUrl || '').replace(/\/$/, '');
         const username = (config.botUsername || 'savdochi_uzbot').replace(/^@/, '');
         if (dealId && token && base) {

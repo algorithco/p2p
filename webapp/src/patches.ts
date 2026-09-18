@@ -604,10 +604,9 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
         setTimeout(() => location.reload(), 700);
       } catch (e: any) {
         TG.haptic.error();
-        UI.toast("Yuborilmadi — qayta urinib ko'ring", 'err');
+        UI.errToast(e);
         shipBtn.removeAttribute('disabled');
         shipBtn.textContent = o;
-        if (String(e.message).includes('seller_ton_address_required')) UI.toast("To'lov manzilini saqlang", 'err');
       }
     });
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
@@ -658,11 +657,11 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
         setTimeout(() => location.reload(), 700);
       } catch (e: any) {
         TG.haptic.error();
-        UI.toast("Tasdiqlanmadi — qayta urinib ko'ring", 'err');
+        // Friendly guidance (deal_locked → don't double-tap, needItemSent → wait, …)
+        // instead of the raw backend code.
+        UI.errToast(e);
         yesBtn.removeAttribute('disabled');
         yesBtn.textContent = o;
-        if (String(e.message).includes('seller_ton_address_required'))
-          UI.toast("Sotuvchi to'lov manzili yo'q — sotuvchi xabardor qilindi", 'err');
       }
     });
     noBtn.addEventListener('click', () => {
@@ -940,9 +939,10 @@ async function renderChannelEscrow(
         TG.haptic.success();
         UI.toast("To'lov yuborildi", 'ok');
         setTimeout(() => location.reload(), 700);
-      } catch {
+      } catch (e: any) {
         TG.haptic.error();
-        UI.toast("To'lov chiqarilmadi — qayta urinib ko'ring", 'err');
+        // escrow_custody_lost / frozen-address guidance instead of raw codes.
+        UI.errToast(e);
         payoutBtn.removeAttribute('disabled');
         payoutBtn.textContent = o;
       }
@@ -1026,11 +1026,9 @@ async function renderChannelEscrow(
           setTimeout(() => location.reload(), 700);
         } catch (e: any) {
           TG.haptic.error();
-          UI.toast("O'tkazilmadi — qayta urinib ko'ring", 'err');
-          try {
-            if (String((e as any).message || '').includes('join'))
-              UI.toast("Yangi ega avval kanalga qo'shilishi kerak", 'err');
-          } catch {}
+          // user_not_participant / fresh_forbidden_wait_24h / custody errors
+          // mapped to guidance; unknown codes still shown, never swallowed.
+          UI.errToast(e);
           goBtn.removeAttribute('disabled');
           goBtn.textContent = o;
         }
@@ -1367,7 +1365,7 @@ function viewChannels() {
                 UI.toast(label + ' bajarildi', 'ok');
               } catch (err: any) {
                 TG.haptic.error();
-                UI.toast(err.message || label + ' bajarilmadi', 'err');
+                UI.errToast(err);
               } finally {
                 btn.removeAttribute('disabled');
                 if (orig) btn.textContent = orig;
@@ -1412,7 +1410,7 @@ function viewChannels() {
               UI.toast("O'tkazildi", 'ok');
             } catch (err: any) {
               TG.haptic.error();
-              UI.toast(err.message || "O'tkazilmadi", 'err');
+              UI.errToast(err);
             } finally {
               btn.removeAttribute('disabled');
               btn.textContent = orig!;
@@ -1443,7 +1441,7 @@ function viewChannels() {
               UI.toast('Egallandi', 'ok');
             } catch (err: any) {
               TG.haptic.error();
-              UI.toast(err.message || 'Egallanmadi — 24 soatlik FRESH_CHANGE himoyasini tekshiring', 'err');
+              UI.errToast(err);
             } finally {
               btn.removeAttribute('disabled');
               btn.textContent = orig!;

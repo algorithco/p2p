@@ -106,7 +106,10 @@ export function releaseComment(deal: {
 export function parseTonComment(body: Cell | Slice | null | undefined): string | null {
   if (!body) return null;
   try {
-    const slice: Slice = body instanceof Cell ? body.beginParse() : body;
+    // Clone caller-owned slices: a failed op check must not consume the input
+    // for a subsequent fallback parse (raw-string memos lost their first 4
+    // bytes this way and never matched a deposit token).
+    const slice: Slice = body instanceof Cell ? body.beginParse() : body.clone();
     if (slice.remainingBits < 32) return null;
     const op = slice.loadUint(32);
     if (op !== 0) return null;
@@ -133,11 +136,12 @@ export function parseTonComment(body: Cell | Slice | null | undefined): string |
 export function parseJettonForwardComment(forwardPayload: Slice | Cell | null | undefined): string | null {
   if (!forwardPayload) return null;
   try {
-    const slice: Slice = forwardPayload instanceof Cell ? forwardPayload.beginParse() : forwardPayload;
+    const slice: Slice = forwardPayload instanceof Cell ? forwardPayload.beginParse() : forwardPayload.clone();
     if (slice.remainingBits === 0 && slice.remainingRefs === 0) return null;
-    // Forward payload may be either a simple comment cell (op 0 + string) or empty
-    // Try to parse as TON comment first
-    const c = parseTonComment(slice);
+    // Forward payload may be either a simple comment cell (op 0 + string) or empty.
+    // Try op-0 first on a FRESH clone: the failed attempt must not eat bytes
+    // needed by the raw-tail fallback below.
+    const c = parseTonComment(slice.clone());
     if (c !== null) return c;
     // If not op 0, it may be a raw string without op (some wallets)
     // Try to read as string tail

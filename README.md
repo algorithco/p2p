@@ -187,14 +187,21 @@ Minimum for off-chain: `BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, `DATABASE_URL` (backen
 - Never commit a real `.env`; it is git-ignored.
 - API auth (see `backend/src/auth/`): mutating routes require a Telegram
   identity — the Mini App's `x-init-data` is HMAC-verified server-side against
-  `BOT_TOKEN` — or an `x-api-key` for server-to-server callers. Admin-only
-  routes (`notify`, `withdraw`, `refund`, notifications history) additionally
-  require the caller to be in `ADMIN_TELEGRAM_IDS`. A dev fallback trusting
-  `x-telegram-user-id` activates only when both `BOT_TOKEN` and `API_KEY`
-  are unset — never in production.
+  `BOT_TOKEN` (sender/body ids are never trusted). The legacy `x-api-key`
+  grants NO identity and NO admin rights. Admin-only routes (`notify`,
+  `withdraw`, `refund`, notifications history, `admin/*`) require the caller
+  to be in `ADMIN_TELEGRAM_IDS` (verified identity) or to present
+  `ADMIN_API_KEY` via `x-admin-api-key`/`Bearer`. A dev fallback trusting
+  `x-telegram-user-id` activates only when `ALLOW_DEV_AUTH=true` AND both
+  `BOT_TOKEN` and `API_KEY` are unset — never in production.
+- Custody model: funds sit in the isolated signer W5 wallet; Postgres is the
+  ledger. Deposits are matched by unguessable memo token + amount, sender
+  address, and (USDT) jetton-master verification — see `JETTON_MASTER_ADDRESS`
+  in `backend/.env.example` (unset = forgery check disabled).
 - Request bodies are capped at 256 KB. In-memory rate limits are active:
-  deal creation 10/min, join 20/min, chat posts 60/min, bot notifications
-  5/min per IP+route.
+  global 300/min, deal creation 10/min, join/recheck 20/min, chat 60/min,
+  deal-key 20/min, payout 10/min, utrade-code 5/min, admin-money 10/min,
+  notify 5/min per IP+route.
 
 ## License
 

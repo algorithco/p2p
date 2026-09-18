@@ -24,6 +24,125 @@ const monitoredAddresses = new Set<string>();
 /** Per-address cursor so only NEW transactions (higher lt) are processed. */
 const cursors = new Map<string, { lt: string; hash: string }>();
 
+// Expected jetton-wallet cache: (master|paymentAddr) -> wallet raw address.
+// Derivation is deterministic on-chain data — cache forever (process lifetime).
+const jettonWalletCache = new Map<string, string>();
+let lastJettonMasterWarnAt = 0;
+
+/**
+ * P0 fake-jetton defense: resolve the payment address's jetton wallet from the
+ * CONFIGURED master. A transfer_notification for a real USDT deposit always
+ * arrives with inMessage.src == this wallet. A notification minted through an
+ * attacker's fake master arrives from a DIFFERENT wallet and must never
+ * confirm a deal. Returns null when verification is impossible (master
+ * unconfigured or RPC failure) — callers fail OPEN with a loud warn in that
+ * case (status quo), but fail CLOSED on positive mismatch.
+ */
+export async function expectedJettonWalletForPayment(paymentAddr: string): Promise<Address | null> {
+  const masterRaw = (config.jettonMasterAddress || config.usdtJettonAddress || '').trim();
+  if (!masterRaw) {
+    const now = Date.now();
+    if (now - lastJettonMasterWarnAt > 5 * 60 * 1000) {
+      lastJettonMasterWarnAt = now;
+      logger.warn(
+        'Listener: JETTON_MASTER_ADDRESS/USDT_JETTON_ADDRESS unset — jetton master forgery check DISABLED. Set the master to stop fake-master notifications confirming USDT deposits.',
+      );
+    }
+    return null;
+  }
+  let master: Address;
+  let pay: Address;
+  try {
+    master = Address.parse(masterRaw);
+    pay = Address.parse(paymentAddr);
+  } catch {
+    return null;
+  }
+  const key = `${master.toRawString()}|${pay.toRawString()}`;
+  const cached = jettonWalletCache.get(key);
+  if (cached) {
+    try {
+      return Address.parse(cached);
+    } catch {
+      jettonWalletCache.delete(key);
+    }
+  }
+  try {
+    const { computeJettonWalletAddress } = await import('./jettonUtils');
+    const w = await computeJettonWalletAddress(master, pay);
+    if (!w) return null;
+    jettonWalletCache.set(key, w.toRawString());
+    return w;
+  } catch {
+    // RPC blip (toncenter 429s happen): do NOT strand real deposits on a
+    // failed derivation — skip this check for now, keep polling.
+    return null;
+  }
+}
+
+/** True when a knowable buyer wallet expectation exists for sender checks. */
+async function hasKnownSenderExpectation(deal: DealRow): Promise<boolean> {
+  if (deal.buyer_expected_address && String(deal.buyer_expected_address).trim()) return true;
+  if (deal.buyer_telegram_id == null) return false;
+  try {
+    const res = await db.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [
+      Number(deal.buyer_telegram_id),
+    ]);
+    return !!(res.rows[0]?.ton_address && String(res.rows[0].ton_address).trim());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Legacy escrow#<id> memos are guessable (sequential ids). Deals that were
+ * issued an unguessable deposit_token must use it: a legacy memo on such a
+ * deal is a stale client or a forgery probe. Confirm only when the sender
+ * provably matches a KNOWN buyer expectation, otherwise hold for review.
+ * Returns true when the deposit must be held (caller alerts + returns).
+ */
+async function holdLegacyMemoOnTokenDeal(
+  deal: DealRow,
+  src: Address | null,
+  txHash: string,
+  amountHuman: string,
+  asset: string,
+  addr: string,
+): Promise<boolean> {
+  const tok = deal.deposit_token ? String(deal.deposit_token).trim().toLowerCase() : '';
+  if (!tok || !isDepositTokenFormat(tok)) return false; // pre-token deal: legacy path unchanged
+  let match = false;
+  if (src) {
+    try {
+      if (await hasKnownSenderExpectation(deal)) match = !(await isSenderMismatch(deal, src));
+    } catch {
+      match = false;
+    }
+  }
+  if (match) return false;
+  const msg = `Legacy memo hold Deal #${deal.id}: escrow#${deal.id} used on a token-issued deal without proven sender — flagged for manual review, NOT auto-confirmed`;
+  logger.warn(msg);
+  try {
+    const { saveAdminAlert } = await import('../db/queries');
+    await saveAdminAlert('legacy_memo_hold', msg, {
+      dealId: deal.id,
+      txHash,
+      amount: amountHuman,
+      asset,
+      src: src ? src.toString() : null,
+    });
+  } catch {}
+  try {
+    await unknownToAdminsAndSave({
+      amount: amountHuman,
+      asset,
+      address: addr,
+      memo: `Legacy memo hold Deal #${deal.id} — manual review required`,
+    });
+  } catch {}
+  return true;
+}
+
 async function loadPersistedCursors() {
   try {
     const res = await db.query('SELECT address, lt, hash FROM listener_cursors');
@@ -71,7 +190,9 @@ export function addAddressToMonitor(address: string) {
   const normalized = address.trim();
   if (!normalized || monitoredAddresses.has(normalized)) return;
   monitoredAddresses.add(normalized);
-  // New address: first poll will seed cursor without processing (avoid replaying old history)
+  // First poll processes the fetched window (bounded pages): guarded
+  // confirm updates make replays safe, while skipping would drop fast
+  // deposits that landed between deal creation and the first tick.
   logger.info(`Listener: added ${normalized} to monitor`);
 }
 
@@ -181,15 +302,26 @@ export function expectedForDeal(deal: DealRow): bigint {
  * Returns found flag + txHash for audit.
  * Used by the 10h scheduler to avoid silently stranding real funds.
  */
-export async function checkMissedDepositOnChain(
-  deal: DealRow,
-): Promise<{ found: boolean; txHash?: string; amount?: bigint; src?: string }> {
+export async function checkMissedDepositOnChain(deal: DealRow): Promise<{
+  found: boolean;
+  txHash?: string;
+  amount?: bigint;
+  src?: string;
+  /** Raw inMessage.src (notifying jetton wallet for jetton deposits) for master verification. */
+  txSrc?: string;
+  /** 'TON' | 'JETTON' — which leg matched, so callers apply the right checks. */
+  kind?: 'TON' | 'JETTON';
+  /** 'token' | 'legacy' — whether the unguessable deposit_token or the guessable escrow#<id> memo matched. */
+  via?: 'token' | 'legacy';
+}> {
   const payAddr = String(deal.payment_address || '').trim();
   if (!payAddr) return { found: false };
   try {
     const { Address } = await import('@ton/core');
     const addr = Address.parse(payAddr);
-    const txs = await client.getTransactions(addr, { limit: 30 });
+    // Wider window than the live poll: expiry runs every 5 min and must not
+    // miss a deposit that fell outside the latest 30 on the shared wallet.
+    const txs = await fetchRecentTransactions(addr, null, 3);
     const expected = expectedForDeal(deal);
     const tokenLower = deal.deposit_token ? String(deal.deposit_token).trim().toLowerCase() : null;
     for (const tx of txs) {
@@ -241,10 +373,25 @@ export async function checkMissedDepositOnChain(
           const raw = forwardComment ?? '';
           const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
           const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
-          const matches =
-            (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+          const viaToken = !!(tok && tokenLower && tok.toLowerCase() === tokenLower);
+          const matches = viaToken || (legacyId != null && legacyId === deal.id);
           if (matches && jettonAmount != null && jettonAmount >= expected) {
-            return { found: true, txHash: hash, amount: jettonAmount, src: jettonSender || undefined };
+            let txSrc: string | undefined;
+            try {
+              const s: unknown = (tx.inMessage!.info as unknown as { src?: unknown })?.src;
+              if (s) txSrc = String((s as { toString?: () => string }).toString?.() ?? s);
+            } catch {
+              txSrc = undefined;
+            }
+            return {
+              found: true,
+              txHash: hash,
+              amount: jettonAmount,
+              src: jettonSender || undefined,
+              txSrc,
+              kind: 'JETTON',
+              via: viaToken ? 'token' : 'legacy',
+            };
           }
           continue;
         }
@@ -264,11 +411,18 @@ export async function checkMissedDepositOnChain(
         const raw = comment ?? '';
         const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
         const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
-        const matches =
-          (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+        const viaToken = !!(tok && tokenLower && tok.toLowerCase() === tokenLower);
+        const matches = viaToken || (legacyId != null && legacyId === deal.id);
         if (matches && value >= expected) {
           const srcStr = tx.inMessage.info.src ? tx.inMessage.info.src.toString() : undefined;
-          return { found: true, txHash: hash, amount: value, src: srcStr };
+          return {
+            found: true,
+            txHash: hash,
+            amount: value,
+            src: srcStr,
+            kind: 'TON',
+            via: viaToken ? 'token' : 'legacy',
+          };
         }
       }
     }
@@ -404,6 +558,11 @@ export async function processTonDeposit(
       return;
     }
     deal = legacyDeal;
+    let legacyHuman = value.toString();
+    try {
+      legacyHuman = fromBaseUnits(value, 'TON');
+    } catch {}
+    if (await holdLegacyMemoOnTokenDeal(deal, src, txHash, legacyHuman, 'TON', addr)) return;
   }
 
   // P0-1 (b): sender verification — if buyer expected address is known, src must match
@@ -497,7 +656,15 @@ export async function processTonDeposit(
       try {
         const excessHuman = fromBaseUnits(excess, 'TON');
         const memoEnc = encryptField(`Ortiqcha qaytarildi Deal #${deal.id}`);
-        await sendTon({ to: src.toString(), value: excessHuman, comment: memoEnc, bounce: false });
+        // Per-tx idempotency: cursor replay / poll overlap re-processing the
+        // same tx must not refund twice (signer dedupes same-key replays).
+        await sendTon({
+          to: src.toString(),
+          value: excessHuman,
+          comment: memoEnc,
+          bounce: false,
+          idempotencyKey: `overpay-refund:${deal.id}:${txHash}`,
+        });
         logger.info(`Deal #${deal.id}: refunded excess ${excessHuman} TON to ${src.toString()}`);
       } catch (e) {
         logger.warn(`Deal #${deal.id}: excess refund failed`, e);
@@ -537,12 +704,14 @@ export async function processTonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
-  // P5-15: capture underpay src for auto-refund after timeout
+  // P5-15: capture underpay src for auto-refund after timeout.
+  // History ARRAY (not a single object): several partial payments must each be
+  // refunded — last-write-wins would strand all but the latest sender's funds.
   if (src) {
     try {
       await db.query(
-        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
-        [gotHuman, src.toString(), deal.id],
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay_history', COALESCE(confirmations->'underpay_history','[]'::jsonb) || jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text, 'tx', $3::text, 'refunded', false)) WHERE id = $4`,
+        [gotHuman, src.toString(), txHash, deal.id],
       );
     } catch {}
   }
@@ -573,6 +742,8 @@ export async function processJettonDeposit(
   note: JettonNotification,
   forwardComment: string | null,
   txHash: string,
+  /** Raw inMessage.src (the notifying jetton wallet). Absent in unit tests — check skipped then. */
+  txSrc?: string | null,
 ) {
   const decrypted = decryptCommentString(forwardComment) ?? forwardComment ?? '';
   const raw = forwardComment ?? '';
@@ -633,6 +804,58 @@ export async function processJettonDeposit(
       return;
     }
     deal = legacyDeal;
+    let legacyJHuman = note.amount.toString();
+    try {
+      legacyJHuman = fromBaseUnits(note.amount, 'USDT');
+    } catch {}
+    if (await holdLegacyMemoOnTokenDeal(deal, note.sender, txHash, legacyJHuman, 'USDT', addr)) return;
+  }
+
+  // P0 fake-jetton defense: the notification must arrive from the payment
+  // address's jetton wallet derived from the CONFIGURED master. Mismatch =
+  // forged notification via attacker's master — never confirm.
+  if (txSrc) {
+    try {
+      const expectedWallet = await expectedJettonWalletForPayment(addr);
+      if (expectedWallet) {
+        let same = false;
+        try {
+          same = Address.parse(txSrc).toRawString() === expectedWallet.toRawString();
+        } catch {
+          same = false;
+        }
+        if (!same) {
+          let jHuman = note.amount.toString();
+          try {
+            jHuman = fromBaseUnits(note.amount, 'USDT');
+          } catch {}
+          const msg = `Jetton master mismatch Deal #${deal.id}: notification src ${txSrc} != expected wallet ${expectedWallet.toString()} — forged master suspected, NOT auto-confirmed`;
+          logger.warn(msg);
+          try {
+            const { saveAdminAlert } = await import('../db/queries');
+            await saveAdminAlert('jetton_master_mismatch', msg, {
+              dealId: deal.id,
+              expected: expectedWallet.toString(),
+              actual: txSrc,
+              amount: jHuman,
+              asset: 'USDT',
+              txHash,
+            });
+          } catch {}
+          try {
+            await unknownToAdminsAndSave({
+              amount: jHuman,
+              asset: 'USDT',
+              address: addr,
+              memo: `Jetton master mismatch Deal #${deal.id} — manual review required`,
+            });
+          } catch {}
+          return;
+        }
+      }
+    } catch (e) {
+      logger.warn(`jetton master check failed for deal #${deal.id}`, e);
+    }
   }
 
   // P0-1 (b): sender verification for jetton (note.sender is on-chain sender)
@@ -733,6 +956,7 @@ export async function processJettonDeposit(
           amount: excessHuman,
           forwardComment: memoEnc,
           forwardTonAmount: '0.01',
+          idempotencyKey: `overpay-refund:${deal.id}:${txHash}`,
         });
         logger.info(`Deal #${deal.id}: refunded excess ${excessHuman} ${assetUpper} to ${senderAddr}`);
       } catch (e) {
@@ -772,12 +996,12 @@ export async function processJettonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
-  // P5-15: capture underpay src for auto-refund after timeout
+  // P5-15: history array — see TON path above (last-write-wins strands funds).
   if (note.sender) {
     try {
       await db.query(
-        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
-        [gotHuman, note.sender.toString(), deal.id],
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay_history', COALESCE(confirmations->'underpay_history','[]'::jsonb) || jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text, 'tx', $3::text, 'refunded', false)) WHERE id = $4`,
+        [gotHuman, note.sender.toString(), txHash, deal.id],
       );
     } catch {}
   }
@@ -786,6 +1010,17 @@ export async function processJettonDeposit(
 async function handleTransaction(addr: string, tx: Transaction) {
   const txHash = tx.hash().toString('hex');
   if (!tx.inMessage) return;
+
+  // Raw inMessage src: for jetton notifications this is the notifying jetton
+  // wallet — verified against the configured master's derived wallet inside
+  // processJettonDeposit (fake-master forgery defense).
+  let txSrc: string | null = null;
+  try {
+    const src: unknown = (tx.inMessage.info as unknown as { src?: unknown })?.src;
+    if (src) txSrc = String((src as { toString?: () => string }).toString?.() ?? src);
+  } catch {
+    txSrc = null;
+  }
 
   // Try jetton first
   const note = parseJettonNotification(tx.inMessage.body);
@@ -800,10 +1035,11 @@ async function handleTransaction(addr: string, tx: Transaction) {
       if (bodySlice.remainingBits > 0 || bodySlice.remainingRefs > 0) {
         try {
           if (bodySlice.remainingRefs > 0) {
-            const fwd = bodySlice.loadRef().beginParse();
-            forwardComment = parseTonComment(fwd) ?? parseJettonForwardComment(fwd);
+            // Fresh parse per attempt: a consumed slice would truncate the memo.
+            const fwdCell = bodySlice.loadRef();
+            forwardComment = parseTonComment(fwdCell.beginParse()) ?? parseJettonForwardComment(fwdCell.beginParse());
           } else {
-            forwardComment = parseTonComment(bodySlice) ?? parseJettonForwardComment(bodySlice);
+            forwardComment = parseTonComment(bodySlice.clone()) ?? parseJettonForwardComment(bodySlice.clone());
           }
         } catch {
           // best-effort: unparsable forward payload means "no memo" (deposit handled as unknown), never crash the poll loop.
@@ -814,7 +1050,7 @@ async function handleTransaction(addr: string, tx: Transaction) {
       // best-effort: same as above for the outer notification-field parse.
       forwardComment = null;
     }
-    await processJettonDeposit(addr, note, forwardComment, txHash);
+    await processJettonDeposit(addr, note, forwardComment, txHash, txSrc);
     return;
   }
 
@@ -834,48 +1070,102 @@ async function handleTransaction(addr: string, tx: Transaction) {
   }
 }
 
+/**
+ * Bounded backward pagination (newest-first pages of 30). Stops at already-seen
+ * history or after maxPages. The old single-page fetch skipped deposits forever
+ * when >30 txs landed between 10s ticks on the shared payment address.
+ */
+async function fetchRecentTransactions(
+  addr: Address,
+  sinceLt: string | null,
+  maxPages: number,
+): Promise<Transaction[]> {
+  const out: Transaction[] = [];
+  const seen = new Set<string>();
+  let lt: string | undefined;
+  let hash: string | undefined;
+  for (let p = 0; p < maxPages; p++) {
+    let page: Transaction[];
+    try {
+      page = await client.getTransactions(addr, { limit: 30, ...(lt ? { lt, hash } : {}) });
+    } catch (e) {
+      logger.warn(`Listener: getTransactions failed for ${addr.toString()} (page ${p + 1})`, e);
+      break;
+    }
+    if (!page.length) break;
+    let reachedSeen = false;
+    for (const tx of page) {
+      const h = tx.hash().toString('hex');
+      if (seen.has(h)) continue;
+      seen.add(h);
+      const txLt = (tx.lt ?? 0n).toString();
+      // Keep same-lt txs here: the precise (lt,hash) cursor in pollAddress
+      // decides those (a same-lt higher-hash tx is still NEW). Drop only
+      // strictly older history.
+      if (sinceLt !== null && BigInt(txLt) < BigInt(sinceLt)) {
+        reachedSeen = true;
+        continue;
+      }
+      out.push(tx);
+    }
+    if (page.length < 30 || reachedSeen) break;
+    const oldest = page[page.length - 1];
+    lt = (oldest.lt ?? 0n).toString();
+    hash = oldest.hash().toString('hex');
+  }
+  // Oldest-first so multi-tx deposit sequences confirm in arrival order.
+  out.sort((a, b) => {
+    const da = BigInt((a.lt ?? 0n).toString()) - BigInt((b.lt ?? 0n).toString());
+    if (da !== 0n) return da < 0n ? -1 : 1;
+    const ha = a.hash().toString('hex');
+    const hb = b.hash().toString('hex');
+    return ha < hb ? -1 : ha > hb ? 1 : 0;
+  });
+  return out;
+}
+
 async function pollAddress(addr: string) {
   // Validate address before polling — prevents a poisoned monitoredAddresses
   // entry from spamming Address.parse errors every tick.
+  let parsed: Address;
   try {
-    Address.parse(addr);
+    parsed = Address.parse(addr);
   } catch {
     logger.warn(`Listener: skipping invalid monitored address ${addr}`);
     monitoredAddresses.delete(addr);
     return;
   }
-  // Limit 30 (still a single API call): the payment address is one shared
-  // signer wallet for all deals, so a tight window could skip deposits and the
-  // cursor would jump past them forever.
-  const txs = await client.getTransactions(Address.parse(addr), { limit: 30 });
-
   const cursor = cursors.get(addr);
-  let maxSeen: { lt: string; hash: string } | null = cursor ? { ...cursor } : null;
+  const txs = await fetchRecentTransactions(parsed, cursor ? cursor.lt : null, 5);
 
+  // First observation (no cursor yet): process the fetched window so fast
+  // deposits landing between deal creation and the first tick are not lost.
+  // (The stale "seed without processing" comment on addAddressToMonitor was
+  // wrong — skipping here would drop those deposits forever.)
+  let cur: { lt: string; hash: string } | null = cursor ? { ...cursor } : null;
   for (const tx of txs) {
     const lt = (tx.lt ?? 0n).toString();
     const entry = { lt, hash: tx.hash().toString('hex') };
-    if (!maxSeen || BigInt(lt) > BigInt(maxSeen.lt)) maxSeen = entry;
-
-    // First observation: process (don't skip) so fast deposits landing
-    // between deal creation and the first tick are not lost forever.
-    // Subsequent polls skip already-seen lt (and same-lt same-hash replays).
-    if (cursor) {
-      if (BigInt(lt) < BigInt(cursor.lt)) continue;
-      if (BigInt(lt) === BigInt(cursor.lt) && entry.hash === cursor.hash) continue;
+    // (lt,hash) cursor: same-lt different-hash txs each advance the cursor, so
+    // nothing is re-processed every tick (the old lt-only cursor looped them).
+    if (cur) {
+      if (BigInt(lt) < BigInt(cur.lt)) continue;
+      if (BigInt(lt) === BigInt(cur.lt) && entry.hash <= cur.hash) continue;
     }
-
     try {
       await handleTransaction(addr, tx);
     } catch (err) {
       logger.error(`Failed handling tx on ${addr} (lt ${lt})`, err);
     }
+    // Advance past even failed txs: a poison tx must not stall the poll loop
+    // forever (failures are logged + admin-alerted inside the handlers).
+    cur = entry;
   }
 
-  if (maxSeen && (!cursor || BigInt(maxSeen.lt) > BigInt(cursor.lt))) {
-    cursors.set(addr, maxSeen);
+  if (cur && (!cursor || cur.lt !== cursor.lt || cur.hash !== cursor.hash)) {
+    cursors.set(addr, cur);
     // Persist to DB so restart doesn't reseed and skip deposits (fix 2.4)
-    await persistCursor(addr, maxSeen.lt, maxSeen.hash);
+    await persistCursor(addr, cur.lt, cur.hash);
   }
 }
 
@@ -891,7 +1181,15 @@ export async function recheckAddress(address: string): Promise<void> {
   }
 }
 
+let listenerStarted = false;
 export async function startListener() {
+  // Idempotent: a second call (e.g. background DB retry after boot) must not
+  // stack another 10s poll loop — each loop re-fetches every monitored wallet.
+  if (listenerStarted) {
+    logger.warn('startListener called twice — ignoring (poll loop already running)');
+    return;
+  }
+  listenerStarted = true;
   logger.info('Blockchain listener started');
   // Fix 2.4: restore persisted cursors and seed monitored addresses from DB
   await loadPersistedCursors();
