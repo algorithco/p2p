@@ -910,8 +910,11 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
         message: `Deal #${id} "${deal.status}" holatda — to'lov allaqachon jarayonda. Takrorlamang; admin on-chain tekshirsin.`,
       };
     }
-    const allowed: string[] = [DEAL_STATUS.ITEM_SENT];
-    if (!allowed.includes(String(deal.status))) {
+    // Single source of truth: dealTransitions.TRANSITION_TABLE (P2-8).
+    // CONFIRM_RECEIPT is allowed only from ITEM_SENT — legacy BUYER_CONFIRMED
+    // must NOT release funds without admin review.
+    const tr = assertTransition(String(deal.status), DEAL_ACTIONS.CONFIRM_RECEIPT);
+    if (!tr.ok) {
       if (deal.status === DEAL_STATUS.DEPOSIT_CONFIRMED) {
         await client.query('ROLLBACK');
         return {
@@ -921,14 +924,13 @@ export async function buyerApproveReceipt(buyerTelegramId: number, dealId: numbe
         };
       }
       if (deal.status === DEAL_STATUS.BUYER_CONFIRMED) {
-        logger.warn(`buyerApproveReceipt legacy BUYER_CONFIRMED for deal #${id}`);
-      } else {
-        await client.query('ROLLBACK');
-        return {
-          success: false,
-          message: `Deal #${id} "${deal.status}" holatda — faqat ITEM_SENT dan tasdiqlash mumkin (sotuvchi avval yuborishi shart).`,
-        };
+        logger.warn(`buyerApproveReceipt blocked legacy BUYER_CONFIRMED for deal #${id}: ${tr.error}`);
       }
+      await client.query('ROLLBACK');
+      return {
+        success: false,
+        message: `Deal #${id} "${deal.status}" holatda — faqat ITEM_SENT dan tasdiqlash mumkin (sotuvchi avval yuborishi shart).`,
+      };
     }
     fromStatus = String(deal.status);
     if (deal.seller_telegram_id == null) {

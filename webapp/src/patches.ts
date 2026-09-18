@@ -700,32 +700,17 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
     return;
   }
 
-  // --- Legacy BUYER_CONFIRMED handling (show legacy) ---
+  // --- Legacy BUYER_CONFIRMED: dead state, never auto-release (P2-8) ---
+  // Backend buyerApproveReceipt rejects CONFIRM_RECEIPT from here, so do NOT
+  // offer an approve button — direct parties to admin review instead.
   if (st === 'BUYER_CONFIRMED' && (isBuyer || isSeller)) {
-    const conf = deal.confirmations || {};
-    const already = (isBuyer && conf.buyer) || (isSeller && conf.seller);
-    if (!already) {
-      const bar = UI.h('div', { class: 'webapp-bar', style: 'margin:12px 0' }) as HTMLElement;
-      const b = UI.h('button', { class: 'btn btn-primary', text: '✅ Tasdiqlash' }) as HTMLButtonElement;
-      b.addEventListener('click', async () => {
-        b.setAttribute('disabled', '');
-        try {
-          await (Api as any).approveDeal(id);
-          UI.toast('Tasdiqlandi', 'ok');
-          setTimeout(() => location.reload(), 600);
-        } catch (e: any) {
-          UI.toast("Tasdiqlanmadi — qayta urinib ko'ring", 'err');
-          b.removeAttribute('disabled');
-        }
-      });
-      bar.appendChild(b);
-      anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
-    } else {
-      const bar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
-        UI.h('div', { class: 'small', text: '✓ Siz tasdiqladingiz — sherik kutilmoqda.' }),
-      ]);
-      anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
-    }
+    const bar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
+      UI.h('div', {
+        class: 'small',
+        text: "⚠️ Bu bitim eski holatda (BUYER_CONFIRMED) — avtomatik chiqarish o'chirilgan. Admin tekshiruvi kutilmoqda: chatga yozing yoki admin bilan bog'laning.",
+      }),
+    ]);
+    anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
 }
