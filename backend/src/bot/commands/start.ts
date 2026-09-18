@@ -1,8 +1,8 @@
-import { Bot, InlineKeyboard, Keyboard } from 'grammy';
+import { Bot, InlineKeyboard } from 'grammy';
 import { config } from '../../config';
 import logger, { sanitizeLogValue } from '../../logger';
 import { getMonthlyBuyerRating } from '../../db/queries';
-import { webAppButton, webAppReplyKeyboard } from '../keyboards';
+import { webAppButton } from '../keyboards';
 
 function welcomeText(): string {
   return [
@@ -42,11 +42,8 @@ function welcomeInlineKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
 }
 
-function welcomeReplyKeyboard(): Keyboard {
-  const base = (config.webappUrl || '').replace(/\/$/, '');
-  // Persistent bottom keyboard — Telegram shows this as a fixed bar under the chat input.
-  // webApp button here opens the Mini App directly (same URL as the menu button).
-  return webAppReplyKeyboard(base || '', '🚀 Ilovani ochish');
+function helpKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('◀️ Orqaga', 'menu:home');
 }
 
 export function registerCommands(bot: Bot) {
@@ -105,20 +102,23 @@ export function registerCommands(bot: Bot) {
       // Join payload handled — don't pile the generic welcome on top of it.
       if (handled) return;
     }
-    // Ordinary /start: rich info + persistent bottom keyboard (web_app) so the
-    // Mini App is one tap away. Inline keyboard stays for in-message actions.
+    // Ordinary /start: keep only inline buttons (no duplicate ReplyKeyboard).
+    // The Mini App is also available via the Telegram Menu Button (bot.ts).
     await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
-    // Bottom bar — persists under the input field (Keyboard with web_app).
-    // Sent as a follow-up with the same text hidden? No — separate keyboard message
-    // so it doesn't replace the inline buttons. Telegram allows one markup per
-    // message, so we set the persistent Keyboard via a second reply.
+    // Remove any stale ReplyKeyboard from the previous build (was duplicate
+    // of the inline). One-time cleanup: clients keep the old persistent keyboard
+    // until we explicitly remove it.
     try {
-      await ctx.reply('Pastdagi tugma orqali ilovani istalgan vaqtda oching 👇', {
-        reply_markup: welcomeReplyKeyboard(),
-      });
-    } catch (e) {
-      logger.warn('welcome reply keyboard failed', e);
-    }
+      await ctx.api
+        .sendMessage(ctx.chat!.id, ' ', {
+          reply_markup: { remove_keyboard: true } as any,
+        })
+        .then(async (m) => {
+          try {
+            await ctx.api.deleteMessage(ctx.chat!.id, m.message_id);
+          } catch {}
+        });
+    } catch {}
   });
 
   bot.callbackQuery('menu:home', async (ctx) => {
@@ -136,10 +136,10 @@ export function registerCommands(bot: Bot) {
       await ctx.answerCallbackQuery?.();
     } catch {} // best-effort: callback may already be answered/expired.
     try {
-      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML' });
+      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     } catch {
       // best-effort: uneditable message — reply instead.
-      await ctx.reply(helpText(), { parse_mode: 'HTML' });
+      await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     }
   };
 
@@ -159,24 +159,8 @@ export function registerCommands(bot: Bot) {
       await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.');
     }
   });
-  // Reply-keyboard fallbacks — user tapped the persistent bottom bar
-  bot.hears('📖 Yordam', async (ctx) => {
-    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
-  });
-  bot.hears('🏆 Reyting', async (ctx) => {
-    try {
-      const [ton, usdt] = await Promise.all([
-        getMonthlyBuyerRatingSafe('TON', 5),
-        getMonthlyBuyerRatingSafe('USDT', 5),
-      ]);
-      await ctx.reply(formatRating(ton, usdt), { parse_mode: 'HTML' });
-    } catch (e) {
-      logger.warn('/reyting hears failed', e);
-      await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.');
-    }
-  });
   bot.command('help', async (ctx) => {
-    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
+    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
   });
 
   // Monthly buyer rating — completed (RELEASED) deals only; only the buyer
