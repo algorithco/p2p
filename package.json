@@ -9,7 +9,8 @@
     "lint:fix": "eslint . --fix",
     "format:check": "prettier --check .",
     "format:write": "prettier --write .",
-    "typecheck": "npm --prefix backend run typecheck && npm --prefix signer run typecheck && npm --prefix ubot run typecheck && npm --prefix utradebot run typecheck && npm --prefix webapp run typecheck",
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix signer run typecheck && npm --prefix ubot run typecheck && npm --prefix utradebot run typecheck && npm --prefix webapp run typecheck && npm --prefix checker run typecheck",
+    "test": "npm --prefix backend run test && npm --prefix signer run test && npm --prefix ubot run test && npm --prefix utradebot run test && npm --prefix checker run test",
     "verify": "npm run typecheck && npm run lint && npm run format:check"
   },
   "devDependencies": {

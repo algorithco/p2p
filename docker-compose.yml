@@ -1,6 +1,6 @@
-# P2P escrow bot — micro-architecture (6 services, no cloudflared)
+# P2P escrow bot — micro-architecture (7 services + postgres)
 #  frontend (webapp nginx :8080 -> backend :3000) | backend (API-only :3000, bot)
-#  signer (W5 :3001) | ubot (:3002) | utradebot (:3003) | postgres (:5432)
+#  signer (W5 :3001) | ubot (:3002) | utradebot (:3003) | checker (NFT verify :3004) | postgres (:5432)
 #  TON Connect manifest is now hosted on GitHub raw (see tonconnect-manifest.json) — no tunnel needed
 #
 # Prerequisites:
@@ -248,6 +248,46 @@ services:
         limits:
           cpus: '0.5'
           memory: 512M
+
+  checker:
+    build:
+      context: .
+      dockerfile: checker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - checker/.env
+    environment:
+      DATABASE_URL: postgres://escrow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/escrow
+      PORT: '3004'
+    expose:
+      - '3004'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://localhost:3004/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 20s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    networks:
+      - escrow-net
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    deploy:
+      resources:
+        limits:
+          cpus: '0.3'
+          memory: 256M
 
 volumes:
   pgdata:
