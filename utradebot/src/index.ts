@@ -1,7 +1,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { timingSafeEqual } from 'node:crypto';
-import { config, validateConfig } from './config';
+import { config, validateConfig, encryptionKeyFingerprint } from './config';
 import logger from './logger';
 import { pool, ensureTables } from './db/queries';
 import { startBot, getBot } from './bot/bot';
@@ -88,6 +88,14 @@ async function main() {
   const errs = validateConfig();
   if (errs.length) {
     for (const e of errs) logger.warn(e);
+    // Fail-closed ENCRYPTION_KEY in ALL environments (BREAKING vs old warn-only fallback).
+    if (errs.some((e) => e.includes('ENCRYPTION_KEY'))) {
+      logger.error('utradebot misconfigured — ENCRYPTION_KEY required (64 hex); refusing to boot plaintext. Exiting');
+      process.exit(1);
+    }
+    // Cross-service compat signal: this fingerprint MUST equal backend's at
+    // boot (shared utrade_trades.session_encrypted). Compare boot logs.
+    logger.info(`ENCRYPTION_KEY fingerprint=${encryptionKeyFingerprint()} (sha256-16, non-secret; must match backend)`);
     if (!config.botToken || !config.databaseUrl) {
       logger.warn('utradebot will start in degraded mode (missing token/db)');
     }

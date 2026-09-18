@@ -32,14 +32,7 @@ import {
 } from './services/dealService';
 import { depositComment, releaseComment } from './utils/comments';
 import { encryptedCommentToPayloadB64, jettonTransferPayload } from './utils/tonPayload';
-import {
-  isEncryptionEnabled,
-  getMasterKey,
-  encryptField,
-  decryptField,
-  assertEncryptionForStrictEnv,
-  warnIfEncryptionDisabledOnce,
-} from './utils/encryption';
+import { isEncryptionEnabled, getMasterKey, encryptField, decryptField } from './utils/encryption';
 import { toBaseUnits } from './utils/money';
 import {
   identityAuth,
@@ -2885,15 +2878,21 @@ function startSchedulers() {
 }
 
 async function boot() {
-  // Fail-closed encryption: refuse to boot in production without a valid master key
-  // (would otherwise store chat keys/memos/phone in plaintext silently).
+  // Fail-closed encryption in ALL environments (not just production): this
+  // service moves money and encrypts chat keys/memos/phones — booting without
+  // a valid key would silently store plaintext. COMPAT MODEL: backend and
+  // utradebot MUST share the same ENCRYPTION_KEY (see config.ts); the
+  // fingerprint below lets operators verify the match from boot logs.
   try {
-    assertEncryptionForStrictEnv();
+    const { assertEncryptionKey, encryptionKeyFingerprint } = await import('./config');
+    assertEncryptionKey();
+    logger.info(
+      `ENCRYPTION_KEY fingerprint=${encryptionKeyFingerprint()} (sha256-16, non-secret; must match utradebot, ubot key is independent)`,
+    );
   } catch (err) {
     logger.error(`FATAL: ${(err as Error).message}`);
     process.exit(1);
   }
-  warnIfEncryptionDisabledOnce();
   // Fix 3.3: fail closed in production if no auth configured and dev not explicitly allowed
   if (process.env.NODE_ENV === 'production' && !config.botToken && !config.apiKey && !config.allowDevAuth) {
     logger.error(
