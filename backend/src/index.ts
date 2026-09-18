@@ -2559,8 +2559,9 @@ function startSchedulers() {
       // the status flips to REFUNDED + confirmations.autoClosed, so the app
       // shows "Yopildi" while nothing is deleted from the server.
       try {
+        // P2-10: respect user-facing deadline — expire if either 10h elapsed OR deadline passed (earlier wins, safer).
         const old = await db.query(
-          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND created_at < now() - interval '10 hours' LIMIT 100`,
+          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND (created_at < now() - interval '10 hours' OR (deadline IS NOT NULL AND deadline < now())) LIMIT 100`,
         );
         for (const d of old.rows) {
           if (isDisputedDeal(d)) continue;
