@@ -1,6 +1,6 @@
 {
-  "name": "TonEscrow — P2P Escrow Mini App",
-  "short_name": "TonEscrow",
+  "name": "Savdochi — P2P Escrow Mini App",
+  "short_name": "Savdochi",
   "description": "Secure P2P escrow deals on TON, inside Telegram.",
   "start_url": "/",
   "display": "standalone",

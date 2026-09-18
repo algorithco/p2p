@@ -1,4 +1,4 @@
-# TonEscrow — Telegram Mini App
+# Savdochi — Telegram Mini App
 
 A Telegram Web App (Mini App) front-end for the P2P escrow bot, built with
 Vite + TypeScript (`src/`, entry `src/main.ts`, output `dist/`). In

@@ -290,7 +290,7 @@ app.get('/tonconnect-manifest.json', (req, res) => {
   }
   res.json({
     url: origin,
-    name: 'TonEscrow',
+    name: 'Savdochi',
     iconUrl: `${origin}/icon.png`,
     termsOfUseUrl: origin,
     privacyPolicyUrl: origin,

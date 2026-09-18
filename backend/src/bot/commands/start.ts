@@ -6,7 +6,7 @@ import { webAppButton } from '../keyboards';
 
 function welcomeText(): string {
   return [
-    `🛡️ <b>TonEscrow — xavfsiz P2P savdo</b>`,
+    `🛡️ <b>Savdochi — xavfsiz P2P savdo</b>`,
     ``,
     `Bu bot pulni tovar/xizmat topshirilgunga qadar ushlab turadi. To'lov <b>TON</b> yoki <b>USDT</b> da, to'g'ridan-to'g'ri blokcheynda.`,
     ``,
