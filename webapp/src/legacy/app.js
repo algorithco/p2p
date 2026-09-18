@@ -275,7 +275,7 @@
       },
       [
         UI.h('div', { class: 'deal-top' }, [
-          UI.h('div', { class: 'asset-glyph ' + am.cls, text: am.glyph }),
+          UI.assetIcon(am),
           UI.h('div', { class: 'deal-mid' }, [
             UI.h('div', { class: 'deal-title', text: 'Bitim #' + deal.id + ' · ' + am.symbol }),
             UI.h('div', { class: 'deal-sub', text: sub }),
@@ -1436,11 +1436,10 @@
               },
             },
             [
-              UI.h('span', {
-                class: 'asset-glyph ' + (key === 'TON' ? 'asset-ton' : 'asset-usdt'),
-                style: 'width:38px;height:38px;font-size:17px;margin-bottom:8px',
-                text: glyph,
-              }),
+              UI.assetIcon(
+                { symbol: key, glyph: glyph, cls: key === 'TON' ? 'asset-ton' : 'asset-usdt' },
+                { style: 'width:38px;height:38px;font-size:17px;margin-bottom:8px' },
+              ),
               UI.h('b', { text: title }),
               UI.h('span', { text: subtext }),
             ],
@@ -2148,7 +2147,7 @@
       }
 
       var head = UI.h('div', { class: 'deal-head' }, [
-        UI.h('div', { class: 'asset-glyph ' + am.cls, text: am.glyph }),
+        UI.assetIcon(am),
         UI.h('div', {}, [
           UI.h('span', { class: 'amt', text: UI.fmtAmount(deal.amount) }),
           UI.h('span', { class: 'cur', text: am.symbol }),
