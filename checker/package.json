@@ -16,7 +16,7 @@
     "@ton/core": "^0.63.1",
     "@ton/ton": "^16.3.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.0.3",
+    "dotenv": "^17.4.2",
     "express": "^4.18.2",
     "express-rate-limit": "^8.7.0",
     "pg": "^8.11.0",
