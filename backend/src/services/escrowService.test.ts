@@ -64,7 +64,7 @@ const mockSendJetton = vi.mocked(sendJetton);
 function mockClient(rows: Record<string, unknown>[] = []) {
   return {
     query: vi.fn().mockImplementation((sql: string) => {
-      if (/^\s*BEGIN|COMMIT|ROLLBACK/i.test(sql)) return Promise.resolve({ rowCount: 0, rows: [] });
+      if (/^\s*(?:BEGIN|COMMIT|ROLLBACK)/i.test(sql)) return Promise.resolve({ rowCount: 0, rows: [] });
       if (/SELECT \* FROM deals WHERE id/i.test(sql)) return Promise.resolve({ rowCount: rows.length, rows });
       if (/UPDATE deals SET status/i.test(sql)) return Promise.resolve({ rowCount: 1, rows: [{ id: 1 }] });
       return Promise.resolve({ rowCount: 1, rows: [] });

@@ -39,6 +39,16 @@ function normalize(s: string): string {
     .replace(/[\s\-_#№]+/g, '');
 }
 
+/**
+ * Strip CR/LF (and truncate) before interpolating user-controlled values
+ * into log lines — prevents log-injection (forged multi-line entries).
+ */
+function sanitizeLogToken(value: unknown, maxLen = 120): string {
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, maxLen);
+}
+
 /** TonAPI item metadata name, with fallback to the item content cell. */
 async function displayName(itemAddress: string, tonapiName?: string | null): Promise<string | null> {
   if (tonapiName) return tonapiName;
@@ -86,10 +96,10 @@ export async function resolveGift(
   try {
     items = await getNftsByOwner(sellerRaw);
   } catch (err) {
-    logger.warn(`gift ${giftName}: owner enumeration failed`, err);
+    logger.warn(`gift ${sanitizeLogToken(giftName)}: owner enumeration failed`, err);
     return { ...base, reason: 'enumeration_failed_check_TONAPI_KEY' };
   }
-  logger.info(`gift ${giftName}: scanning ${items.length} NFT(s) of seller`);
+  logger.info(`gift ${sanitizeLogToken(giftName)}: scanning ${items.length} NFT(s) of seller`);
   const sampleNames: string[] = [];
   for (const it of items) {
     try {
@@ -111,7 +121,7 @@ export async function resolveGift(
         sampleNames,
       };
     } catch (err) {
-      logger.warn(`gift ${giftName}: candidate rejected`, err);
+      logger.warn(`gift ${sanitizeLogToken(giftName)}: candidate rejected`, err);
     }
   }
   return { ...base, reason: 'gift_not_found_in_seller_wallet', scanned: items.length, sampleNames };
