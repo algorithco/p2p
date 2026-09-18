@@ -45,7 +45,9 @@ export function registerBuyFlow(bot: Bot) {
     setAwaitingCode(tradeId, from, phone);
     await tradeService.bindBuyer(tradeId, from); // ensure status AWAITING_CODE
     await ctx.reply(
-      `✅ You are buyer for trade #${tradeId}.\n\n` +
+      `⚠️ OGOHLANTIRISH: Sotuvchi hali ham telefon raqam egasi — istalgan vaqtda SMS orqali kod so'rab kirishi mumkin. ` +
+        `Xaridordan keyin darhol 2FA parol o'rnating va iloji bo'lsa telefon raqamini almashtiring. Ushbu tavakkalni tushungan holda davom eting.\n\n` +
+        `✅ You are buyer for trade #${tradeId}.\n\n` +
         `Phone: \`${phone}\`\n\n` +
         `Please trigger Telegram login on your device (enter this phone in Telegram app) and send the login code you receive via SMS/Telegram to this chat. The tradebot will verify code, log you in, and log itself out.`,
       { parse_mode: 'Markdown' },

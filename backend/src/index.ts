@@ -2787,6 +2787,49 @@ function startSchedulers() {
       } catch (e) {
         logger.warn('remConfirm scheduler failed', e);
       }
+
+      // P3-12: channel/group transfer stall — seller verified but not transferred to escrow within 6h
+      try {
+        const stall = await db.query(
+          `SELECT * FROM deals WHERE deal_type IN ('CHANNEL','GROUP')
+            AND status = 'DEPOSIT_CONFIRMED' AND transfer_to_escrow_at IS NULL
+            AND created_at < now() - interval '6 hours' LIMIT 100`,
+        );
+        for (const d of stall.rows) {
+          try {
+            const { saveAdminAlert } = await import('./db/queries');
+            await saveAdminAlert(
+              'channel_stall',
+              `Channel deal #${d.id} (${d.channel_username}) DEPOSIT_CONFIRMED but not transferred to escrow @gramchioka within 6h — seller stall, admin review required`,
+              {
+                dealId: Number(d.id),
+                channelUsername: d.channel_username,
+              },
+            );
+            const like = dealLikeForNotify(d);
+            if (d.buyer_telegram_id)
+              try {
+                await notify.adminDecisionToParty(
+                  Number(d.buyer_telegram_id),
+                  like,
+                  `Kanal ${d.channel_username} 6 soatdan beri escrow ga o'tmadi — admin ko'rib chiqadi.`,
+                );
+              } catch {}
+            if (d.seller_telegram_id)
+              try {
+                await notify.adminDecisionToParty(
+                  Number(d.seller_telegram_id),
+                  like,
+                  `Kanal ${d.channel_username} ni @gramchioka ga o'tkazing, 6 soat o'tdi.`,
+                );
+              } catch {}
+          } catch (e) {
+            logger.warn(`channel stall alert failed for deal #${sanitizeLogValue(d.id)}`, e);
+          }
+        }
+      } catch (e) {
+        logger.warn('channel stall scheduler failed', e);
+      }
     } catch (e) {
       logger.warn('scheduler run failed', e);
     }

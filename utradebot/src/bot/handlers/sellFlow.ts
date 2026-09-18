@@ -211,6 +211,12 @@ export function registerSellFlow(bot: Bot) {
     }
 
     sellSteps.delete(from);
+    // P3-11: structural trust gap — phone retains control, warn both parties prominently before proceeding
+    await ctx.reply(
+      `⚠️ OGOHLANTIRISH (P3-11): Sotuvchi telefon raqami orqali istalgan vaqtda SMS kod so'rab akkauntni qaytarib olishi mumkin. ` +
+        `Utradebot faqat sessiyalarni bekor qiladi, SIM Egasi emas. ` +
+        `Xaridor buni tushunib, tavakkalni qabul qilgan holda davom etsin. Savdo tugagach zudlik bilan 2FA parol o'rnating va telefon raqamini o'zgartirishni ko'rib chiqing.`,
+    );
     await ctx.reply(
       `✅ Trade #${tradeId} created. Kicked ${kicked} other sessions. Holding account securely.\n\n` +
         `Next steps:\n` +
