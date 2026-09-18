@@ -150,6 +150,26 @@ export function assetMeta(asset: string) {
   if (a === 'USDT') return { name: 'Tether', symbol: 'USDT', glyph: '₮', cls: 'asset-usdt' };
   return { name: a || 'Aktiv', symbol: a || '?', glyph: '◆', cls: 'asset-any' };
 }
+/**
+ * Round asset logo element: TON uses the Gram circular badge PNG
+ * (/img/ton-badge.png, from the gram-pack); other assets keep the glyph
+ * circle. Extra attrs (e.g. inline style) pass through to the wrapper.
+ */
+export function assetIcon(am: { symbol: string; glyph: string; cls: string }, attrs?: Record<string, any>) {
+  if (String(am.symbol || '').toUpperCase() === 'TON') {
+    return h('div', Object.assign({ class: 'asset-glyph asset-ton has-img' }, attrs || {}), [
+      (() => {
+        const img = document.createElement('img');
+        img.className = 'asset-img';
+        img.src = '/img/ton-badge.png';
+        img.alt = 'TON';
+        img.draggable = false;
+        return img;
+      })(),
+    ]);
+  }
+  return h('div', Object.assign({ class: 'asset-glyph ' + am.cls, text: am.glyph }, attrs || {}));
+}
 export const feeBpsEstimate = 100;
 export function avatarClass(seed: any): string {
   return 'av-' + (Math.abs(Number(seed) || 0) % 4);
@@ -439,6 +459,7 @@ export const UI = {
   icon,
   iconLabel,
   iconNames,
+  assetIcon,
   copy,
   skeletonDeals,
   sheetOpen,
