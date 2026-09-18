@@ -848,7 +848,8 @@ async function resolveRequesterPhotoFileId(telegramId: number): Promise<string |
     if (!bot || !config.botToken) return null;
     const photos = await Promise.race([
       bot.api.getUserProfilePhotos(telegramId, { limit: 1 }),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo_timeout')), 4000)),
+      // Live-measured Bot API latency ~1.7s per call; 4s flapped under load.
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo_timeout')), 8000)),
     ]);
     const sizes: Array<{ file_id?: string; file_size?: number }> = (photos as any)?.photos?.[0] || [];
     let best: string | null = null;
@@ -1346,6 +1347,33 @@ function setCachedUserPhoto(id: number, buf: Buffer, ct: string): void {
   userPhotoCache.set(id, { buf, ct, at: Date.now() });
 }
 
+/**
+ * Sniff image type from magic bytes. Telegram serves profile photos as
+ * `application/octet-stream`, so the Content-Type header is useless for
+ * validation — a header allowlist (`image/*`) rejects EVERY real photo
+ * (diagnosed live: 200 + 165KB octet-stream → 404). Returns the proper
+ * content-type, or null for non-images (never serve those).
+ */
+function sniffImageContentType(buf: Buffer): string | null {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  return null;
+}
+
 /** Fetch raw Telegram file bytes server-side (bot token never leaves the server). */
 async function fetchTelegramFileBytes(fileId: string): Promise<{ buf: Buffer; ct: string } | null> {
   const bot = getBot();
@@ -1357,7 +1385,7 @@ async function fetchTelegramFileBytes(fileId: string): Promise<{ buf: Buffer; ct
     try {
       file = (await Promise.race([
         bot.api.getFile(fileId),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo_timeout')), 4000)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('photo_timeout')), 8000)),
       ])) as { file_path?: string } | null;
     } finally {
       clearTimeout(timer);
@@ -1377,10 +1405,10 @@ async function fetchTelegramFileBytes(fileId: string): Promise<{ buf: Buffer; ct
         arrayBuffer(): Promise<ArrayBuffer>;
       };
       if (!up.ok) return null;
-      const ct = up.headers.get('content-type') || 'image/jpeg';
-      if (!ct.startsWith('image/')) return null;
       const buf = Buffer.from(await up.arrayBuffer());
       if (!buf.length || buf.length > 1024 * 1024) return null;
+      const ct = sniffImageContentType(buf);
+      if (!ct) return null;
       return { buf, ct };
     } finally {
       clearTimeout(timer);
