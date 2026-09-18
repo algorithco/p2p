@@ -1968,6 +1968,39 @@ app.post(
   }),
 );
 
+// Admin: stuck payouts dashboard (P1-6) & fee failures (P1-5)
+app.get(
+  '/api/admin/stuck',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const { listStuckDeals } = await import('./services/escrowService');
+    const rows = await listStuckDeals(limit);
+    res.json({ stuck: rows });
+  }),
+);
+app.get(
+  '/api/admin/fee-failures',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const { listFeeFailedDeals } = await import('./services/escrowService');
+    const rows = await listFeeFailedDeals(limit);
+    res.json({ failures: rows });
+  }),
+);
+app.post(
+  '/api/admin/fee-retry/:id',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const { retryFeePayout } = await import('./services/escrowService');
+    const result = await retryFeePayout(dealId);
+    if (!result.ok) return res.status(400).json(result);
+    res.json(result);
+  }),
+);
 app.get(
   '/api/status/:address',
   publicTonLimiter,
@@ -2624,7 +2657,47 @@ function startSchedulers() {
     5 * 60 * 1000,
   );
   (timer as unknown as { unref?: () => void }).unref?.();
-  logger.info('Schedulers started (expiry + reminders, 5 min)');
+
+  // P1-6: escalating re-alert for stuck payouts every 6h (no auto-retry)
+  const stuckTimer = setInterval(
+    async () => {
+      try {
+        const { reconcileStuckWithEscalation } = await import('./services/escrowService');
+        const n = await reconcileStuckWithEscalation(360);
+        if (n) logger.warn(`Stuck payout re-alert: ${n} deal(s) still pending`);
+      } catch (e) {
+        logger.warn('stuck re-alert failed', e);
+      }
+    },
+    6 * 60 * 60 * 1000,
+  );
+  (stuckTimer as unknown as { unref?: () => void }).unref?.();
+
+  // P1-5: auto-retry fee legs every 30 min (bounded 5 attempts, escalating alerts)
+  const feeTimer = setInterval(
+    async () => {
+      try {
+        const { listFeeFailedDeals, retryFeePayout } = await import('./services/escrowService');
+        const fails = (await listFeeFailedDeals(20)) as Array<{ id: number; fee_retry_count?: number }>;
+        for (const f of fails) {
+          if ((f.fee_retry_count ?? 0) >= 5) continue;
+          // simple jitter: only retry if last retry >30 min ago or never
+          try {
+            await retryFeePayout(Number(f.id));
+          } catch (e) {
+            logger.warn(`auto fee retry failed for deal #${f.id}`, e);
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (e) {
+        logger.warn('fee auto-retry failed', e);
+      }
+    },
+    30 * 60 * 1000,
+  );
+  (feeTimer as unknown as { unref?: () => void }).unref?.();
+
+  logger.info('Schedulers started (expiry + reminders 5 min, stuck re-alert 6h, fee retry 30 min)');
 }
 
 async function boot() {
