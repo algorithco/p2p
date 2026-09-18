@@ -174,6 +174,112 @@ export function expectedForDeal(deal: DealRow): bigint {
   ).expectedDeposit;
 }
 
+/**
+ * P1-4: check on-chain for a missed deposit before auto-close.
+ * Queries recent transactions for the deal's payment_address and looks for a memo
+ * matching deposit_token (preferred) or legacy escrow#<id> with amount >= expectedDeposit.
+ * Returns found flag + txHash for audit.
+ * Used by the 10h scheduler to avoid silently stranding real funds.
+ */
+export async function checkMissedDepositOnChain(
+  deal: DealRow,
+): Promise<{ found: boolean; txHash?: string; amount?: bigint; src?: string }> {
+  const payAddr = String(deal.payment_address || '').trim();
+  if (!payAddr) return { found: false };
+  try {
+    const { Address } = await import('@ton/core');
+    const addr = Address.parse(payAddr);
+    const txs = await client.getTransactions(addr, { limit: 30 });
+    const expected = expectedForDeal(deal);
+    const tokenLower = deal.deposit_token ? String(deal.deposit_token).trim().toLowerCase() : null;
+    for (const tx of txs) {
+      const hash = tx.hash().toString('hex');
+      if (!tx.inMessage) continue;
+      // Jetton notification path first (like handleTransaction)
+      let forwardComment: string | null = null;
+      let jettonAmount: bigint | null = null;
+      let jettonSender: string | null = null;
+      try {
+         
+        const parsed: { queryId: bigint; amount: bigint; sender: Address | null } | null = (() => {
+          try {
+            const cs = tx.inMessage!.body.beginParse();
+            const op = cs.loadUint(32);
+            if (op !== JETTON_TRANSFER_NOTIFICATION_OP) return null;
+            const q = cs.loadUintBig(64);
+            const amt = cs.loadCoins();
+            const snd = cs.loadAddress();
+            return { queryId: q, amount: amt, sender: snd };
+          } catch {
+            return null;
+          }
+        })();
+        if (parsed) {
+          jettonAmount = parsed.amount;
+          jettonSender = parsed.sender ? parsed.sender.toString() : null;
+          try {
+            const bodySlice = tx.inMessage!.body.beginParse();
+            bodySlice.loadUint(32);
+            bodySlice.loadUintBig(64);
+            bodySlice.loadCoins();
+            bodySlice.loadAddress();
+            if (bodySlice.remainingBits > 0 || bodySlice.remainingRefs > 0) {
+              try {
+                if (bodySlice.remainingRefs > 0) {
+                  const fwd = bodySlice.loadRef().beginParse();
+                  forwardComment = parseTonComment(fwd) ?? parseJettonForwardComment(fwd);
+                } else {
+                  forwardComment = parseTonComment(bodySlice) ?? parseJettonForwardComment(bodySlice);
+                }
+              } catch {
+                forwardComment = null;
+              }
+            }
+          } catch {
+            forwardComment = null;
+          }
+          const dec = decryptCommentString(forwardComment) ?? forwardComment ?? '';
+          const raw = forwardComment ?? '';
+          const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
+          const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
+          const matches =
+            (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+          if (matches && jettonAmount != null && jettonAmount >= expected) {
+            return { found: true, txHash: hash, amount: jettonAmount, src: jettonSender || undefined };
+          }
+          continue;
+        }
+      } catch {
+        // fall through to TON check
+      }
+      if (tx.inMessage.info.type === 'internal') {
+        const value = tx.inMessage.info.value.coins;
+        if (value < expected) continue;
+        let comment: string | null = null;
+        try {
+          comment = parseTonComment(tx.inMessage.body);
+        } catch {
+          comment = null;
+        }
+        const dec = decryptCommentString(comment) ?? comment ?? '';
+        const raw = comment ?? '';
+        const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
+        const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
+        const matches =
+          (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+        if (matches && value >= expected) {
+          const srcStr = tx.inMessage.info.src ? tx.inMessage.info.src.toString() : undefined;
+          return { found: true, txHash: hash, amount: value, src: srcStr };
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn(`checkMissedDeposit for deal #${deal.id} failed`, e);
+    return { found: false };
+  }
+  return { found: false };
+}
+
 async function postChatSystemMessage(dealId: number, text: string) {
   try {
     const { addDealMessage } = await import('../services/dealService');

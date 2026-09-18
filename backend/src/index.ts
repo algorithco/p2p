@@ -2531,14 +2531,112 @@ function startSchedulers() {
           if (isDisputedDeal(d)) continue;
           if (String(d.status) === 'RELEASED' || String(d.status) === 'REFUNDED') continue;
           try {
-            const closed = await updateDealStatus(Number(d.id), 'REFUNDED', undefined, ['AWAITING_DEPOSIT']);
-            if (!closed) continue;
+            // P1-3: single source validation via dealTransitions
+             
+            const { DEAL_ACTIONS, assertTransition, guardedStatusUpdate } = await import('./services/dealTransitions');
+            const tr = assertTransition(String(d.status), DEAL_ACTIONS.EXPIRE);
+            if (!tr.ok) {
+              logger.warn(`expiry skip deal #${sanitizeLogValue(d.id)}: ${tr.error}`);
+              continue;
+            }
+            // P1-4: before DB-only close, check on-chain for missed deposit
+            let missed: { found: boolean; txHash?: string } = { found: false };
             try {
-              await db.query(
-                `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"autoClosed":true}'::jsonb, updated_at = now() WHERE id = $1`,
-                [d.id],
+              const { checkMissedDepositOnChain } = await import('./blockchain/listener');
+              missed = await checkMissedDepositOnChain(d as unknown as import('./blockchain/listener').DealRow);
+            } catch (e) {
+              logger.warn(`missed deposit check failed for deal #${sanitizeLogValue(d.id)}`, e);
+            }
+            if (missed.found) {
+              // Real funds exist — route through deposit-confirm + on-chain refund, not bare DB close
+              try {
+                // Confirm deposit first (guarded)
+                const confirmed = await updateDealStatus(Number(d.id), 'DEPOSIT_CONFIRMED', missed.txHash, [
+                  'AWAITING_DEPOSIT',
+                ]);
+                if (confirmed) {
+                  try {
+                    const { adminRefund } = await import('./services/escrowService');
+                    const refundRes = await adminRefund(
+                      (config.adminTelegramIds[0] || 0) as unknown as number,
+                      Number(d.id),
+                    );
+                    logger.info(
+                      `expiry: deal #${sanitizeLogValue(d.id)} had missed deposit ${missed.txHash}, refund attempted: ${JSON.stringify(refundRes).slice(0, 200)}`,
+                    );
+                    try {
+                      const { saveAdminAlert } = await import('./db/queries');
+                      await saveAdminAlert(
+                        'auto_close_missed_refund',
+                        `Deal #${d.id} missed deposit ${missed.txHash} found — routed to refund`,
+                        {
+                          dealId: Number(d.id),
+                          txHash: missed.txHash,
+                          refundOk: (refundRes as { success?: boolean }).success,
+                        },
+                      );
+                    } catch {}
+                  } catch (refundErr) {
+                    logger.warn(`missed deposit refund failed for deal #${sanitizeLogValue(d.id)}`, refundErr);
+                    try {
+                      const { saveAdminAlert } = await import('./db/queries');
+                      await saveAdminAlert(
+                        'auto_close_missed_refund_failed',
+                        `Deal #${d.id} missed deposit ${missed.txHash} — CONFIRMED but refund failed`,
+                        {
+                          dealId: Number(d.id),
+                          txHash: missed.txHash,
+                          error: String((refundErr as Error).message || refundErr),
+                        },
+                      );
+                    } catch {}
+                  }
+                  continue; // do not do DB-only close
+                }
+              } catch (e) {
+                logger.warn(`missed deposit handling failed for deal #${sanitizeLogValue(d.id)}`, e);
+              }
+            }
+            // P5-15: underpay auto-refund — wire captured sender address into expiry
+            try {
+              const { tryRefundUnderpay } = await import('./services/escrowService');
+              await tryRefundUnderpay(
+                d as unknown as {
+                  id: number | string;
+                  asset?: string | null;
+                  confirmations?: Record<string, unknown> | null;
+                },
               );
-            } catch {}
+            } catch (e) {
+              logger.warn(`underpay auto-refund failed for deal #${d.id}`, e);
+            }
+            // P1-3: use guarded update for EXPIRE (same validation as assert above)
+            const client = await db.connect();
+            let closed = false;
+            try {
+              await client.query('BEGIN');
+              const rowCount = await guardedStatusUpdate(client, Number(d.id), 'AWAITING_DEPOSIT', tr.next, [
+                'resolved_at = now()',
+              ]);
+              if (rowCount > 0) {
+                await client.query(
+                  `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"autoClosed":true}'::jsonb, updated_at = now() WHERE id = $1`,
+                  [d.id],
+                );
+                await client.query('COMMIT');
+                closed = true;
+              } else {
+                await client.query('ROLLBACK');
+              }
+            } catch (e) {
+              try {
+                await client.query('ROLLBACK');
+              } catch {}
+              throw e;
+            } finally {
+              client.release();
+            }
+            if (!closed) continue;
             const msg = `10 soat to'lov bo'lmagani uchun yopildi`;
             const like = dealLikeForNotify(d);
             if (d.buyer_telegram_id != null) {
@@ -2557,9 +2655,15 @@ function startSchedulers() {
             } catch {}
             try {
               const { saveAdminAlert } = await import('./db/queries');
-              await saveAdminAlert('auto_close', `Deal #${d.id} 10 soat to'lovsiz yopildi (REFUNDED+autoClosed)`, {
-                dealId: Number(d.id),
-              });
+              await saveAdminAlert(
+                'auto_close',
+                `Deal #${d.id} 10 soat to'lovsiz yopildi (REFUNDED+autoClosed, on-chain checked: ${missed.found ? 'missed_found_refunded' : 'no_deposit'})`,
+                {
+                  dealId: Number(d.id),
+                  onChainChecked: true,
+                  missedFound: missed.found,
+                },
+              );
             } catch {}
           } catch (e) {
             logger.warn(`expiry close failed for deal #${sanitizeLogValue(d.id)}`, e);
