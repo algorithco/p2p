@@ -42,6 +42,10 @@ function welcomeInlineKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
 }
 
+function helpKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('◀️ Orqaga', 'menu:home');
+}
+
 export function registerCommands(bot: Bot) {
   bot.command('start', async (ctx) => {
     const payload = ((ctx.match as string) || '').trim();
@@ -132,10 +136,10 @@ export function registerCommands(bot: Bot) {
       await ctx.answerCallbackQuery?.();
     } catch {} // best-effort: callback may already be answered/expired.
     try {
-      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML' });
+      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     } catch {
       // best-effort: uneditable message — reply instead.
-      await ctx.reply(helpText(), { parse_mode: 'HTML' });
+      await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     }
   };
 
@@ -156,7 +160,7 @@ export function registerCommands(bot: Bot) {
     }
   });
   bot.command('help', async (ctx) => {
-    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
+    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
   });
 
   // Monthly buyer rating — completed (RELEASED) deals only; only the buyer
