@@ -56,6 +56,17 @@ function apiKeyMatches(req: Request): boolean {
   return provided !== null && timingSafeStringEqual(provided, config.apiKey);
 }
 
+export function adminApiKeyMatches(req: Request): boolean {
+  if (!config.adminApiKey) return false;
+  // P0-2: distinct header only — no fallback to x-api-key (removes ambiguity)
+  const headerKey = (req.headers['x-admin-api-key'] as string) || '';
+  const bearer = (req.headers['authorization'] as string) || '';
+  const bearerKey = bearer.startsWith('Bearer ') ? bearer.slice(7) : '';
+  const provided = headerKey || bearerKey;
+  if (!provided) return false;
+  return timingSafeStringEqual(provided, config.adminApiKey);
+}
+
 /**
  * Attach-only identity middleware — never rejects.
  * Priority: valid Telegram initData > api-key > dev header fallback > anonymous.
@@ -130,9 +141,12 @@ export function getIdentityId(req: Request): number | null {
   return null;
 }
 
-/** Admins pass via verified identity membership; api-key callers are server-to-server admins. */
+/** Admins pass via verified identity membership; service api-key no longer grants admin.
+ * P0-2: only ADMIN_API_KEY or verified Telegram admin id may access admin endpoints.
+ * Generic API_KEY (used by signer/ubot) is explicitly NOT sufficient.
+ */
 export const requireAdmin: RequestHandler = (req, res, next) => {
-  if (req.authMode === 'api-key') return next();
+  if (adminApiKeyMatches(req)) return next();
   if (
     req.user &&
     isValidPositiveInt(req.user.id) &&
@@ -154,6 +168,9 @@ export interface RateLimitOptions {
  * Rate limiter built on express-rate-limit (in-memory store) keyed by ip.
  * Returns 429 {error:'rate_limited'} with RateLimit/Retry-After headers once max hits/window exceeded.
  * Each call creates an independent bucket; `name` is kept for keying/observability.
+ * P5-16: per-process/in-memory — if more than one backend instance is ever run,
+ * effective limit multiplies by N. For horizontal scaling, migrate to a shared store
+ * (e.g. rate-limit-redis + Redis service in docker-compose). Single-instance only today.
  */
 export function rateLimit(options: RateLimitOptions): RequestHandler {
   const limiter = expressRateLimit({

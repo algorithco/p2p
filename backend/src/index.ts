@@ -852,10 +852,17 @@ app.get(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = req.authMode === 'api-key' || isAdminTelegramId(caller);
+    const { adminApiKeyMatches } = await import('./auth/guard');
+    const isAdminCaller = adminApiKeyMatches(req) || isAdminTelegramId(caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const key = await getDealChatKey(dealId);
-    return res.json({ dealId, key, algo: 'aes-256-gcm', format: 'base64' });
+    return res.json({
+      dealId,
+      key,
+      algo: 'aes-256-gcm',
+      format: 'base64',
+      note: 'encrypted at rest, accessible to platform admins for dispute resolution — not E2E against operator',
+    });
   }),
 );
 

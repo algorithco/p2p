@@ -38,6 +38,7 @@ export const config = {
   })(),
   adminAddress: process.env.ADMIN_ADDRESS || '',
   apiKey: process.env.API_KEY || undefined,
+  adminApiKey: process.env.ADMIN_API_KEY || undefined,
   webappUrl: process.env.WEBAPP_URL || '',
   frontendUrl: process.env.FRONTEND_URL || process.env.WEBAPP_URL || 'http://localhost:8080',
   serveStatic: process.env.SERVE_STATIC === 'true',
