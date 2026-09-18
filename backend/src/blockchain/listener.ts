@@ -200,7 +200,6 @@ export async function checkMissedDepositOnChain(
       let jettonAmount: bigint | null = null;
       let jettonSender: string | null = null;
       try {
-         
         const parsed: { queryId: bigint; amount: bigint; sender: Address | null } | null = (() => {
           try {
             const cs = tx.inMessage!.body.beginParse();
@@ -535,6 +534,15 @@ export async function processTonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
+  // P5-15: capture underpay src for auto-refund after timeout
+  if (src) {
+    try {
+      await db.query(
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
+        [gotHuman, src.toString(), deal.id],
+      );
+    } catch {}
+  }
 }
 
 interface JettonNotification {
@@ -761,6 +769,15 @@ export async function processJettonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
+  // P5-15: capture underpay src for auto-refund after timeout
+  if (note.sender) {
+    try {
+      await db.query(
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
+        [gotHuman, note.sender.toString(), deal.id],
+      );
+    } catch {}
+  }
 }
 
 async function handleTransaction(addr: string, tx: Transaction) {
