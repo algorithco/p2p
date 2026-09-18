@@ -24,7 +24,10 @@ export function registerSellFlow(bot: Bot) {
           if (phone) {
             await db.setPhone(tradeId, phone);
           }
-        } catch {}
+        } catch (e) {
+          // Diagnosable: a key-mismatch throw lands here (not swallowed silently).
+          logger.warn(`confirm_payment phone derive failed for trade #${tradeId}`, e);
+        }
       }
       if (!phone) {
         await ctx.answerCallbackQuery({ text: 'Phone not known — use /setphone <tradeId> <phone>' });
