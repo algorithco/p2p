@@ -52,6 +52,17 @@ let connectPromise: Promise<TelegramClient> | null = null;
 let lastAuthFailureAt = 0;
 let lastConnectAttemptAt = 0;
 let connectAttempts = 0;
+// Last time real Telegram activity was ensured (fast-path hit or fresh connect or
+// successful queued call). Drives the idle auto-disconnect sweeper in index.ts.
+let lastActivityAt = 0;
+
+export function getLastActivityAt(): number {
+  return lastActivityAt;
+}
+
+function touchActivity(): void {
+  lastActivityAt = Date.now();
+}
 
 // Global flood state — never violate Telegram's FloodWait
 let globalFloodUntil = 0;
@@ -249,9 +260,13 @@ export async function ensureClient(): Promise<TelegramClient> {
 
   if (client) {
     try {
-      // Small human jitter before authorization check
-      await sleep(150 + Math.random() * 400);
-      if (await client.checkAuthorization()) return client;
+      // Cached auth check (12-20s TTL inside checkAuthorized, incl. human jitter):
+      // a burst of backend calls shares ONE Telegram checkAuthorization instead of
+      // one per call. No extra sleep here — checkAuthorized already jitters.
+      if (await checkAuthorized()) {
+        touchActivity();
+        return client;
+      }
       logger.warn('checkAuthorization returned false — session no longer authorized');
       await disconnect();
     } catch (e) {
@@ -328,7 +343,7 @@ export async function ensureClient(): Promise<TelegramClient> {
       floodSleepThreshold: config.floodThreshold || 60,
       requestRetries: 5,
       timeout: 15,
-      keepAliveInterval: 30000, // avoid NAT idle close (Docker NAT ~5min) by pinging every 30s
+      keepAliveInterval: config.keepAliveMs, // TCP ping; 120s default is far below ~5min Docker NAT idle timeout
       sequentialUpdates: false,
       useIPV6: false,
       proxy: proxyConf as never,
@@ -423,6 +438,7 @@ export async function ensureClient(): Promise<TelegramClient> {
     client = c;
     lastAuthFailureAt = 0;
     connectAttempts = 0;
+    touchActivity();
     return c;
   })();
 
@@ -452,7 +468,9 @@ export async function withFloodWait<T>(fn: () => Promise<T>, retries = 3): Promi
     const isFinal = i === retries - 1;
     try {
       // Queue through bottleneck to respect global rate limits
-      return await telegramQueue(fn);
+      const result = await telegramQueue(fn);
+      touchActivity();
+      return result;
     } catch (e) {
       const msg = String(
         (e as { message?: unknown; errorMessage?: unknown })?.message ??

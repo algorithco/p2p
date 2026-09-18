@@ -1,4 +1,4 @@
-/* app.js — TonEscrow Mini App: router, views, controllers */
+/* app.js — Savdochi Mini App: router, views, controllers */
 (function () {
   'use strict';
   var TG = window.TG;
@@ -406,7 +406,7 @@
 
   function viewHome() {
     setTabbar(true);
-    setTopbar('TonEscrow');
+    setTopbar('Savdochi');
 
     var s = App.state;
     var name = (s.user && (s.user.first_name || s.user.username)) || 'there';
@@ -570,7 +570,7 @@
     document.getElementById('view').appendChild(root);
     load(false);
 
-    setTopbar('TonEscrow');
+    setTopbar('Savdochi');
 
     var t = setInterval(function () {
       load(true);
@@ -713,7 +713,7 @@
               {
                 class: 'btn btn-primary',
                 onclick: function () {
-                  TG.share(shareUrl, "TonEscrow'da escrow bitimim #" + deal.id + ' — qoshilish uchun bosing');
+                  TG.share(shareUrl, "Savdochi'da escrow bitimim #" + deal.id + ' — qoshilish uchun bosing');
                 },
               },
               [isBotLink ? 'Bot havolani ulashish' : 'Taklifni ulashish'],
@@ -2239,7 +2239,7 @@
   function applyThemeMode() {
     try {
       document.body.setAttribute('data-theme-mode', 'dark');
-      localStorage.setItem('tonescrow:theme', 'dark');
+      localStorage.setItem('Savdochi:theme', 'dark');
     } catch (e) {
       /* ignore */
     }
@@ -2425,7 +2425,7 @@
             {
               class: 'list-item',
               onclick: function () {
-                TG.alert("TonEscrow v2.0 — TON'da P2P escrow bitimlar uchun Telegram Mini App.");
+                TG.alert("Savdochi v2.0 — TON'da P2P escrow bitimlar uchun Telegram Mini App.");
               },
             },
             [
@@ -2576,7 +2576,7 @@
         /* ignore */
       }
     });
-    console.log('[TonEscrow] build v3 — ' + new Date().toISOString());
+    console.log('[Savdochi] build v3 — ' + new Date().toISOString());
 
     TG.init();
     // Prefer real Telegram user when inside Telegram; preview fallback only for browsing

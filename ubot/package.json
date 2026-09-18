@@ -31,8 +31,8 @@
     "@types/node": "^26.5.1",
     "ts-node": "^10.9.0",
     "typescript": "7.0.2",
-    "vitest": "^4.1.11",
-    "zod": "^4.6.2"
+    "vitest": "^5.0.1",
+    "zod": "^4.6.5"
   },
   "overrides": {
     "qs": "^6.16.0"

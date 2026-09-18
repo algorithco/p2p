@@ -27,7 +27,7 @@ Open these 2 files and replace `YOUR_USERNAME` / `YOUR_REPO`:
 ```json
 {
   "url": "https://github.com/YOUR_USERNAME/YOUR_REPO",
-  "name": "TonEscrow",
+  "name": "Savdochi",
   "iconUrl": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/webapp/public/icon.png",
   "termsOfUseUrl": "https://github.com/YOUR_USERNAME/YOUR_REPO#terms",
   "privacyPolicyUrl": "https://github.com/YOUR_USERNAME/YOUR_REPO#privacy"

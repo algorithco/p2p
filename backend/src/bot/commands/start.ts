@@ -6,27 +6,44 @@ import { webAppButton } from '../keyboards';
 
 function welcomeText(): string {
   return [
-    `🛡️ SafeDeal — xavfsiz savdo.`,
-    `Bot pulni tovar topshirilgunga qadar ushlaydi.`,
-    `Hamma ish ilovada bajariladi.`,
-    `Davom etish uchun pastdagi tugmani bosing.`,
+    `🛡️ <b>Savdochi — xavfsiz P2P savdo</b>`,
+    ``,
+    `Bu bot pulni tovar/xizmat topshirilgunga qadar ushlab turadi. To'lov <b>TON</b> yoki <b>USDT</b> da, to'g'ridan-to'g'ri blokcheynda.`,
+    ``,
+    `<b>Qanday ishlaydi:</b>`,
+    `1️⃣ Bitim yarating — narx, shartlar va muddatni kiriting`,
+    `2️⃣ Xaridor to'lov qiladi — pul escrow hamyonda saqlanadi`,
+    `3️⃣ Sotuvchi “Yubordim” bosadi, xaridor “Qabul qildim” tasdiqlaydi`,
+    `4️⃣ Tasdiqdan keyin pul avtomatik sotuvchiga o'tadi (komissiya 1%). Nizo bo'lsa admin hal qiladi`,
+    ``,
+    `Barcha amallar ilovada — pastdagi <b>🚀 Ilovani ochish</b> tugmasini bosing.`,
+    `Havola orqali taklif qilingan bo'lsangiz, havola avtomatik ochiladi.`,
   ].join('\n');
 }
 
 function helpText(): string {
   return [
-    `📖 Yordam: hamma ish ilovada.`,
-    `Havola orqali qo'shiling va to'lovni ilovada qiling.`,
-    `Muammo bo'lsa admin bilan bog'laning.`,
+    `📖 <b>Yordam</b>`,
+    ``,
+    `• Bitim yarating → havola ulashing → sherik qo'shilsin`,
+    `• To'lovni faqat ilovada qiling — izoh (memo) avtomatik shifrlanadi`,
+    `• “Yubordim” / “Qabul qildim” tugmalari bilan yakunlang`,
+    `• Muammo bo'lsa /disputes (admin) yoki pastdagi Reyting tugmasi`,
+    ``,
+    `Ilovani pastdagi tugma orqali oching.`,
   ].join('\n');
 }
 
-function welcomeKeyboard(): InlineKeyboard {
+function welcomeInlineKeyboard(): InlineKeyboard {
   const base = (config.webappUrl || '').replace(/\/$/, '');
   if (base) {
-    return webAppButton(base, 'Ilovani ochish').row().text('Yordam', 'help');
+    return webAppButton(base, '🚀 Ilovani ochish').row().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
   }
-  return new InlineKeyboard().text('Yordam', 'help');
+  return new InlineKeyboard().text('📖 Yordam', 'help').text('🏆 Reyting', 'help:rating');
+}
+
+function helpKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('◀️ Orqaga', 'menu:home');
 }
 
 export function registerCommands(bot: Bot) {
@@ -39,6 +56,13 @@ export function registerCommands(bot: Bot) {
       if (sep !== -1) {
         const dealId = rest.slice(0, sep);
         const token = rest.slice(sep + 1);
+        // Validate before reflecting into URLs/replies: Telegram start payloads
+        // are attacker-craftable (t.me/<bot>?start=join_...). Reject junk so a
+        // malicious payload can never reach the Mini App fragment path raw.
+        if (!/^\d{1,10}$/.test(dealId) || !/^[A-Za-z0-9_-]{10,128}$/.test(token)) {
+          await ctx.reply(`Taklif havolasi buzilgan — yangisini so'rang.`);
+          return;
+        }
         const base = (config.webappUrl || '').replace(/\/$/, '');
         const username = (config.botUsername || 'savdochi_uzbot').replace(/^@/, '');
         if (dealId && token && base) {
@@ -78,16 +102,32 @@ export function registerCommands(bot: Bot) {
       // Join payload handled — don't pile the generic welcome on top of it.
       if (handled) return;
     }
-    await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+    // Ordinary /start: keep only inline buttons (no duplicate ReplyKeyboard).
+    // The Mini App is also available via the Telegram Menu Button (bot.ts).
+    await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
+    // Remove any stale ReplyKeyboard from the previous build (was duplicate
+    // of the inline). One-time cleanup: clients keep the old persistent keyboard
+    // until we explicitly remove it.
+    try {
+      await ctx.api
+        .sendMessage(ctx.chat!.id, ' ', {
+          reply_markup: { remove_keyboard: true } as any,
+        })
+        .then(async (m) => {
+          try {
+            await ctx.api.deleteMessage(ctx.chat!.id, m.message_id);
+          } catch {}
+        });
+    } catch {}
   });
 
   bot.callbackQuery('menu:home', async (ctx) => {
     await ctx.answerCallbackQuery();
     try {
-      await ctx.editMessageText(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+      await ctx.editMessageText(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
     } catch {
       // best-effort: edit fails when the message is unchanged/deleted — reply instead.
-      await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeKeyboard() });
+      await ctx.reply(welcomeText(), { parse_mode: 'HTML', reply_markup: welcomeInlineKeyboard() });
     }
   });
 
@@ -96,16 +136,44 @@ export function registerCommands(bot: Bot) {
       await ctx.answerCallbackQuery?.();
     } catch {} // best-effort: callback may already be answered/expired.
     try {
-      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML' });
+      await ctx.editMessageText?.(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     } catch {
       // best-effort: uneditable message — reply instead.
-      await ctx.reply(helpText(), { parse_mode: 'HTML' });
+      await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
     }
   };
 
   bot.callbackQuery('help', async (ctx) => showHelp(ctx));
+  bot.callbackQuery('help:rating', async (ctx) => {
+    try {
+      await ctx.answerCallbackQuery();
+    } catch {}
+    try {
+      const [ton, usdt] = await Promise.all([
+        getMonthlyBuyerRatingSafe('TON', 5),
+        getMonthlyBuyerRatingSafe('USDT', 5),
+      ]);
+      const text = formatRating(ton, usdt);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: helpKeyboard() });
+      } catch {
+        await ctx.reply(text, { parse_mode: 'HTML', reply_markup: helpKeyboard() });
+      }
+    } catch (e) {
+      logger.warn('/reyting inline failed', e);
+      try {
+        await ctx.editMessageText('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.', {
+          reply_markup: helpKeyboard(),
+        });
+      } catch {
+        await ctx.reply('Reyting hozircha mavjud emas — birozdan keyin urinib ko‘ring.', {
+          reply_markup: helpKeyboard(),
+        });
+      }
+    }
+  });
   bot.command('help', async (ctx) => {
-    await ctx.reply(helpText(), { parse_mode: 'HTML' });
+    await ctx.reply(helpText(), { parse_mode: 'HTML', reply_markup: helpKeyboard() });
   });
 
   // Monthly buyer rating — completed (RELEASED) deals only; only the buyer

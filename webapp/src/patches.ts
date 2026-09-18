@@ -288,9 +288,11 @@ function injectHomeSearch(view: HTMLElement) {
   const hero = view.querySelector('.hero');
   const seg = view.querySelector('.segmented');
   if (!hero || !seg) return;
-  const searchRow = UI.h('div', { class: 'search-row' }, [
+  const searchRow = UI.h('div', { class: 'search-row', style: 'position:relative' }, [
+    UI.icon('search', ''),
     UI.h('input', {
       class: 'search-input',
+      style: 'padding-left:38px',
       placeholder: "ID, aktiv, holat bo'yicha qidirish…",
       oninput(e: any) {
         (window as any).App.state.searchQuery = e.target.value.toLowerCase().trim();
@@ -300,6 +302,14 @@ function injectHomeSearch(view: HTMLElement) {
       },
     }),
   ]) as HTMLElement;
+  // Search glyph sits inside the input (left).
+  try {
+    const glyph = searchRow.querySelector('.ico') as HTMLElement | null;
+    if (glyph) {
+      glyph.style.cssText +=
+        ';position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.55;pointer-events:none';
+    }
+  } catch {}
   seg.parentNode!.insertBefore(searchRow, seg.nextSibling);
 }
 
@@ -464,6 +474,13 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
   ) as HTMLElement;
   const anchor = actionsTitle || (view.querySelector('.deal-head') as HTMLElement);
   if (!anchor) return;
+  // Dedupe: patchViewDeal's observer can invoke injectWebappBar twice concurrently
+  // (both if-branches match, or a re-render lands mid-fetch). Each call renders at
+  // most ONE bar, so a bar present at insert time means the sibling call already
+  // won — without this the same banner renders twice (seen live on DEPOSIT_CONFIRMED).
+  // isConnected also drops late responses after navigating to another deal.
+  if (!view.isConnected) return;
+  if (view.querySelector('.webapp-bar')) return;
   const st = String(deal.status || '').toUpperCase();
   const dealType = String((deal as any).deal_type || (deal as any).dealType || 'P2P').toUpperCase();
   const isChannelDeal = dealType === 'CHANNEL' || dealType === 'GROUP';
@@ -474,13 +491,15 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       UI.toast(doneText, 'ok');
     } catch {}
     const doneBar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
-      UI.h('div', {
-        class: 'small',
-        text:
-          st === 'RELEASED'
-            ? '✅ Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
-            : '↩️ Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
-      }),
+      UI.h('div', { class: 'small', style: 'display:flex;align-items:center;gap:8px' }, [
+        UI.icon(st === 'RELEASED' ? 'party-popper' : 'circle-check-big', 'ico-pop'),
+        UI.h('span', {
+          text:
+            st === 'RELEASED'
+              ? 'Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
+              : 'Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
+        }),
+      ]),
     ]);
     try {
       anchor.parentNode!.insertBefore(doneBar, anchor.nextSibling);
@@ -584,7 +603,10 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       });
       row.appendChild(fillBtn);
     } catch {}
-    const shipBtn = UI.h('button', { class: 'btn btn-primary', text: '📦 Yetkazdim' }) as HTMLButtonElement;
+    const shipBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('badge-check', 'ico-pop'),
+      ' Yetkazdim',
+    ]) as HTMLButtonElement;
     const hint = UI.h('div', {
       class: 'field-hint',
       style: 'text-align:center',
@@ -604,10 +626,9 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
         setTimeout(() => location.reload(), 700);
       } catch (e: any) {
         TG.haptic.error();
-        UI.toast("Yuborilmadi — qayta urinib ko'ring", 'err');
+        UI.errToast(e);
         shipBtn.removeAttribute('disabled');
         shipBtn.textContent = o;
-        if (String(e.message).includes('seller_ton_address_required')) UI.toast("To'lov manzilini saqlang", 'err');
       }
     });
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
@@ -632,11 +653,14 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
       ]),
     );
     const btnRow = UI.h('div', { style: 'display:flex;gap:10px' }) as HTMLElement;
-    const yesBtn = UI.h('button', {
-      class: 'btn btn-primary',
-      text: '✅ Oldim — pulni chiqarish',
-    }) as HTMLButtonElement;
-    const noBtn = UI.h('button', { class: 'btn btn-ghost', text: '❌ Hali emas (chatni ochish)' }) as HTMLButtonElement;
+    const yesBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('circle-check-big', 'ico-pop'),
+      ' Oldim — pulni chiqarish',
+    ]) as HTMLButtonElement;
+    const noBtn = UI.h('button', { class: 'btn btn-ghost' }, [
+      UI.icon('message-circle', 'ico-wiggle'),
+      ' Hali emas (chatni ochish)',
+    ]) as HTMLButtonElement;
     btnRow.appendChild(yesBtn);
     btnRow.appendChild(noBtn);
     const hint = UI.h('div', {
@@ -658,11 +682,11 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
         setTimeout(() => location.reload(), 700);
       } catch (e: any) {
         TG.haptic.error();
-        UI.toast("Tasdiqlanmadi — qayta urinib ko'ring", 'err');
+        // Friendly guidance (deal_locked → don't double-tap, needItemSent → wait, …)
+        // instead of the raw backend code.
+        UI.errToast(e);
         yesBtn.removeAttribute('disabled');
         yesBtn.textContent = o;
-        if (String(e.message).includes('seller_ton_address_required'))
-          UI.toast("Sotuvchi to'lov manzili yo'q — sotuvchi xabardor qilindi", 'err');
       }
     });
     noBtn.addEventListener('click', () => {
@@ -700,32 +724,17 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
     return;
   }
 
-  // --- Legacy BUYER_CONFIRMED handling (show legacy) ---
+  // --- Legacy BUYER_CONFIRMED: dead state, never auto-release (P2-8) ---
+  // Backend buyerApproveReceipt rejects CONFIRM_RECEIPT from here, so do NOT
+  // offer an approve button — direct parties to admin review instead.
   if (st === 'BUYER_CONFIRMED' && (isBuyer || isSeller)) {
-    const conf = deal.confirmations || {};
-    const already = (isBuyer && conf.buyer) || (isSeller && conf.seller);
-    if (!already) {
-      const bar = UI.h('div', { class: 'webapp-bar', style: 'margin:12px 0' }) as HTMLElement;
-      const b = UI.h('button', { class: 'btn btn-primary', text: '✅ Tasdiqlash' }) as HTMLButtonElement;
-      b.addEventListener('click', async () => {
-        b.setAttribute('disabled', '');
-        try {
-          await (Api as any).approveDeal(id);
-          UI.toast('Tasdiqlandi', 'ok');
-          setTimeout(() => location.reload(), 600);
-        } catch (e: any) {
-          UI.toast("Tasdiqlanmadi — qayta urinib ko'ring", 'err');
-          b.removeAttribute('disabled');
-        }
-      });
-      bar.appendChild(b);
-      anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
-    } else {
-      const bar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
-        UI.h('div', { class: 'small', text: '✓ Siz tasdiqladingiz — sherik kutilmoqda.' }),
-      ]);
-      anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
-    }
+    const bar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
+      UI.h('div', {
+        class: 'small',
+        text: "⚠️ Bu bitim eski holatda (BUYER_CONFIRMED) — avtomatik chiqarish o'chirilgan. Admin tekshiruvi kutilmoqda: chatga yozing yoki admin bilan bog'laning.",
+      }),
+    ]);
+    anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
 }
@@ -941,10 +950,10 @@ async function renderChannelEscrow(
         saveBtn.removeAttribute('disabled');
       }
     });
-    const payoutBtn = UI.h('button', {
-      class: 'btn btn-primary',
-      text: "💸 To'lovni so'rash (komissiya chegiriladi)",
-    }) as HTMLButtonElement;
+    const payoutBtn = UI.h('button', { class: 'btn btn-primary' }, [
+      UI.icon('clock', ''),
+      " To'lovni so'rash (komissiya chegiriladi)",
+    ]) as HTMLButtonElement;
     payoutBtn.addEventListener('click', async () => {
       const v = input.value.trim();
       payoutBtn.setAttribute('disabled', '');
@@ -955,9 +964,10 @@ async function renderChannelEscrow(
         TG.haptic.success();
         UI.toast("To'lov yuborildi", 'ok');
         setTimeout(() => location.reload(), 700);
-      } catch {
+      } catch (e: any) {
         TG.haptic.error();
-        UI.toast("To'lov chiqarilmadi — qayta urinib ko'ring", 'err');
+        // escrow_custody_lost / frozen-address guidance instead of raw codes.
+        UI.errToast(e);
         payoutBtn.removeAttribute('disabled');
         payoutBtn.textContent = o;
       }
@@ -1026,10 +1036,10 @@ async function renderChannelEscrow(
           UI.h('div', { class: 'small', text: `Yangi ega: ${already} — O'tkazish ni bosing.` }),
         ]),
       );
-      const goBtn = UI.h('button', {
-        class: 'btn btn-primary',
-        text: `🚀 ${chan} ni ${already} ga o'tkazish`,
-      }) as HTMLButtonElement;
+      const goBtn = UI.h('button', { class: 'btn btn-primary' }, [
+        UI.icon('key', 'ico-tap'),
+        ` ${chan} ni ${already} ga o'tkazish`,
+      ]) as HTMLButtonElement;
       goBtn.addEventListener('click', async () => {
         goBtn.setAttribute('disabled', '');
         const o = goBtn.textContent!;
@@ -1041,11 +1051,9 @@ async function renderChannelEscrow(
           setTimeout(() => location.reload(), 700);
         } catch (e: any) {
           TG.haptic.error();
-          UI.toast("O'tkazilmadi — qayta urinib ko'ring", 'err');
-          try {
-            if (String((e as any).message || '').includes('join'))
-              UI.toast("Yangi ega avval kanalga qo'shilishi kerak", 'err');
-          } catch {}
+          // user_not_participant / fresh_forbidden_wait_24h / custody errors
+          // mapped to guidance; unknown codes still shown, never swallowed.
+          UI.errToast(e);
           goBtn.removeAttribute('disabled');
           goBtn.textContent = o;
         }
@@ -1382,7 +1390,7 @@ function viewChannels() {
                 UI.toast(label + ' bajarildi', 'ok');
               } catch (err: any) {
                 TG.haptic.error();
-                UI.toast(err.message || label + ' bajarilmadi', 'err');
+                UI.errToast(err);
               } finally {
                 btn.removeAttribute('disabled');
                 if (orig) btn.textContent = orig;
@@ -1427,7 +1435,7 @@ function viewChannels() {
               UI.toast("O'tkazildi", 'ok');
             } catch (err: any) {
               TG.haptic.error();
-              UI.toast(err.message || "O'tkazilmadi", 'err');
+              UI.errToast(err);
             } finally {
               btn.removeAttribute('disabled');
               btn.textContent = orig!;
@@ -1458,7 +1466,7 @@ function viewChannels() {
               UI.toast('Egallandi', 'ok');
             } catch (err: any) {
               TG.haptic.error();
-              UI.toast(err.message || 'Egallanmadi — 24 soatlik FRESH_CHANGE himoyasini tekshiring', 'err');
+              UI.errToast(err);
             } finally {
               btn.removeAttribute('disabled');
               btn.textContent = orig!;
@@ -1540,9 +1548,12 @@ function viewChannels() {
   const root = UI.h('div', {}, [
     UI.h('div', { class: 'hero' }, [
       UI.h('h1', { text: 'Kanallar studiyasi' }),
-      UI.h('p', {
-        text: "Kanallar va guruhlarni egallash — shifrlangan ubot orqali admin qilish, taklif qilish, egalikni o'tkazish.",
-      }),
+      UI.h('p', { style: 'display:flex;align-items:center;gap:8px' }, [
+        UI.icon('lock-keyhole', ''),
+        UI.h('span', {
+          text: "Kanallar va guruhlarni egallash — shifrlangan ubot orqali admin qilish, taklif qilish, egalikni o'tkazish.",
+        }),
+      ]),
     ]),
     UI.h('div', { class: 'card' }, [
       UI.h('label', { text: 'Kanal / Guruh' }),
