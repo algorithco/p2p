@@ -4,7 +4,7 @@ Isolated key management for the escrow backend. Holds `SIGNER_MNEMONIC` (24 word
 
 - Wallet: `WalletContractV5R1` (`@ton/ton` `^15`, `@ton/crypto` `^3.3`, `@ton/core` `^0.63`)
 - Network: `testnet` (default) or `mainnet` via `TON_NETWORK`
-- Endpoints: `GET /health` (open), `GET /address`, `GET /info`, `POST /deploy`, `POST /send`, `POST /send-batch`, `POST /deploy-escrow` (all require `x-api-key`)
+- Endpoints: `GET /health` (open), `GET /address`, `GET /info`, `POST /deploy`, `POST /send`, `POST /send-batch`, `POST /deploy-escrow` (all require `x-api-key`). Note: `deploy-escrow` is a generic state-init sender kept for compat — there is no Tact escrow contract in this repo; custody is the W5 wallet itself.
 
 ## Setup
 
@@ -35,7 +35,7 @@ curl -H "x-api-key: $SIGNER_API_KEY" http://localhost:3001/info
 curl -X POST -H "x-api-key: $SIGNER_API_KEY" -H "Content-Type: application/json" \
   -d '{"to":"UQ...","value":"0.1","comment":"payout"}' http://localhost:3001/send
 
-# deploy escrow contract
+# deploy escrow contract (LEGACY generic sender — no Tact contract in repo)
 curl -X POST -H "x-api-key: $SIGNER_API_KEY" -H "Content-Type: application/json" \
   -d '{"escrowAddress":"EQ...","escrowStateInit":{"codeBoc":"<base64>","dataBoc":"<base64>"},"value":"0.12"}' \
   http://localhost:3001/deploy-escrow

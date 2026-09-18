@@ -16,7 +16,7 @@
 - [ ] No secrets (mnemonics, bot tokens, API keys, session strings) are committed
 - [ ] `.env` files and session/log artifacts are NOT included in the diff
 - [ ] New config values are documented in the relevant `.env.example`
-- [ ] Smart-contract changes include updated `contracts/tests` and are covered by the sandbox suite
+- [ ] Fund-flow changes include updated payout-path tests (`backend/src/services/*.test.ts`, `backend/src/blockchain/listener.test.ts`) — no on-chain contract suite exists (custodial model)
 - [ ] Docker images still build if Dockerfiles/dependencies changed
 
 ## Security considerations

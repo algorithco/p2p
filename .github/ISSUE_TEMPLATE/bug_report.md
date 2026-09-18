@@ -12,11 +12,10 @@ A clear and concise description of the problem.
 **Affected component**
 
 - [ ] backend
-- [ ] signer
+- [ ] signer (custodial W5 wallet)
 - [ ] ubot
 - [ ] utradebot
 - [ ] webapp (Mini App)
-- [ ] contracts (Escrow.tact)
 - [ ] infrastructure / docker-compose
 
 **To reproduce**

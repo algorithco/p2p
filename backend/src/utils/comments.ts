@@ -6,9 +6,42 @@
 
 import { Cell, Slice } from '@ton/core';
 
-/** Short, deterministic deposit comment for a deal. Buyer must include this when paying. */
-export function depositComment(dealId: number | string): string {
+/** Generate unguessable per-deal deposit token (32 hex chars = 128 bits). */
+export function generateDepositToken(): string {
+  // Use Node crypto at call site to avoid top-level import cycle
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const crypto = require('node:crypto') as typeof import('node:crypto');
+  return crypto.randomBytes(16).toString('hex');
+}
+
+/** Detect whether a string looks like a deposit token (32-64 hex chars). */
+export function isDepositTokenFormat(s: string): boolean {
+  const t = String(s || '').trim();
+  return /^[0-9a-fA-F]{32,64}$/.test(t);
+}
+
+/** Short, deterministic deposit comment for a deal. Buyer must include this when paying.
+ * P0-1: new deals use unguessable deposit_token (return token directly); legacy deals still use escrow#<id>.
+ * Keep backward compat: if token looks like a deposit token, return it; otherwise fall back to escrow#<id>.
+ */
+export function depositComment(dealId: number | string, depositToken?: string | null): string {
+  if (depositToken && isDepositTokenFormat(String(depositToken).trim())) {
+    return String(depositToken).trim().toLowerCase();
+  }
   return `escrow#${dealId}`;
+}
+
+/** Extract deposit token from a comment if it looks like one. */
+export function parseDepositToken(comment: string | null | undefined): string | null {
+  if (!comment) return null;
+  const s = String(comment).trim().toLowerCase();
+  // token may be bare 32 hex or prefixed with escrow#? handle both
+  // If comment is exactly token
+  if (isDepositTokenFormat(s)) return s;
+  // If comment is escrow#<token> where token is hex
+  const m = s.match(/^(?:escrow|deal)\s*[:#]\s*([0-9a-f]{32,64})\b/i);
+  if (m && isDepositTokenFormat(m[1])) return m[1].toLowerCase();
+  return null;
 }
 
 /** Try to extract deal id from a deposit comment. Strict: requires escrow/deal prefix.

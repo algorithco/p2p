@@ -4,7 +4,13 @@ import type { Transaction } from '@ton/core';
 import { updateDealStatus, dealLike } from '../services/dealService';
 import { db } from '../db/queries';
 import { fromBaseUnits, dealPricing } from '../utils/money';
-import { parseDepositComment, parseTonComment, parseJettonForwardComment } from '../utils/comments';
+import {
+  parseDepositComment,
+  parseDepositToken,
+  isDepositTokenFormat,
+  parseTonComment,
+  parseJettonForwardComment,
+} from '../utils/comments';
 import { decryptCommentString } from '../utils/tonPayload';
 import { encryptField } from '../utils/encryption';
 import { config } from '../config';
@@ -69,7 +75,7 @@ export function addAddressToMonitor(address: string) {
   logger.info(`Listener: added ${normalized} to monitor`);
 }
 
-interface DealRow {
+export interface DealRow {
   id: number;
   asset: string | null;
   amount: string | null;
@@ -78,11 +84,13 @@ interface DealRow {
   seller_telegram_id: number | null;
   payment_address: string | null;
   terms: string | null;
+  deposit_token: string | null;
+  buyer_expected_address: string | null;
 }
 
-async function findAwaitingDealById(dealId: number, paymentAddress?: string): Promise<DealRow | null> {
+export async function findAwaitingDealById(dealId: number, paymentAddress?: string): Promise<DealRow | null> {
   const res = await db.query(
-    `SELECT id, asset, amount, fee_bps, buyer_telegram_id, seller_telegram_id, payment_address, terms
+    `SELECT id, asset, amount, fee_bps, buyer_telegram_id, seller_telegram_id, payment_address, terms, deposit_token, buyer_expected_address
      FROM deals WHERE id = $1 AND status = $2 LIMIT 1`,
     [dealId, 'AWAITING_DEPOSIT'],
   );
@@ -101,13 +109,174 @@ async function findAwaitingDealById(dealId: number, paymentAddress?: string): Pr
   return row;
 }
 
-function expectedForDeal(deal: DealRow): bigint {
+export async function findAwaitingDealByToken(token: string, paymentAddress?: string): Promise<DealRow | null> {
+  const t = String(token || '')
+    .trim()
+    .toLowerCase();
+  if (!isDepositTokenFormat(t)) return null;
+  const res = await db.query(
+    `SELECT id, asset, amount, fee_bps, buyer_telegram_id, seller_telegram_id, payment_address, terms, deposit_token, buyer_expected_address
+     FROM deals WHERE deposit_token = $1 AND status = $2 LIMIT 1`,
+    [t, 'AWAITING_DEPOSIT'],
+  );
+  const row = res.rows[0] as DealRow | undefined;
+  if (!row) return null;
+  if (paymentAddress && row.payment_address && row.payment_address !== paymentAddress) {
+    try {
+      if (Address.parse(row.payment_address).toRawString() !== Address.parse(paymentAddress).toRawString()) {
+        return null;
+      }
+    } catch {
+      if (row.payment_address !== paymentAddress) return null;
+    }
+  }
+  return row;
+}
+
+/**
+ * P0-1 (b): sender verification.
+ * If buyer_expected_address is set (captured at deal creation or from users.ton_address),
+ * then deposit src must match it; otherwise flag for manual review and do NOT auto-confirm.
+ * Returns true if mismatch (should NOT auto-confirm), false if ok or no expectation.
+ */
+export async function isSenderMismatch(deal: DealRow, srcAddress: Address | null): Promise<boolean> {
+  if (!srcAddress) return false; // cannot verify without sender
+  let expected: string | null =
+    (deal as unknown as { buyer_expected_address?: string | null }).buyer_expected_address || null;
+  if (!expected && deal.buyer_telegram_id != null) {
+    try {
+      const res = await db.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [
+        Number(deal.buyer_telegram_id),
+      ]);
+      if (res.rows[0]?.ton_address) expected = String(res.rows[0].ton_address).trim();
+    } catch {
+      // best-effort: DB failure means we cannot verify — do not block deposit
+      return false;
+    }
+  }
+  if (!expected) return false; // no expectation knowable — residual trust assumption documented
+  try {
+    const expectedRaw = Address.parse(expected).toRawString();
+    const srcRaw = srcAddress.toRawString();
+    return expectedRaw !== srcRaw;
+  } catch {
+    // if expected address unparsable, do not block
+    return false;
+  }
+}
+
+export function expectedForDeal(deal: DealRow): bigint {
   // Single source: same pricing the deal creator, the payout path and the UI see.
   return dealPricing(
     String(deal.amount ?? '0'),
     String(deal.asset ?? 'TON'),
     ((deal as { fee_bps?: unknown }).fee_bps as number | undefined) ?? config.feeBps ?? 100,
   ).expectedDeposit;
+}
+
+/**
+ * P1-4: check on-chain for a missed deposit before auto-close.
+ * Queries recent transactions for the deal's payment_address and looks for a memo
+ * matching deposit_token (preferred) or legacy escrow#<id> with amount >= expectedDeposit.
+ * Returns found flag + txHash for audit.
+ * Used by the 10h scheduler to avoid silently stranding real funds.
+ */
+export async function checkMissedDepositOnChain(
+  deal: DealRow,
+): Promise<{ found: boolean; txHash?: string; amount?: bigint; src?: string }> {
+  const payAddr = String(deal.payment_address || '').trim();
+  if (!payAddr) return { found: false };
+  try {
+    const { Address } = await import('@ton/core');
+    const addr = Address.parse(payAddr);
+    const txs = await client.getTransactions(addr, { limit: 30 });
+    const expected = expectedForDeal(deal);
+    const tokenLower = deal.deposit_token ? String(deal.deposit_token).trim().toLowerCase() : null;
+    for (const tx of txs) {
+      const hash = tx.hash().toString('hex');
+      if (!tx.inMessage) continue;
+      // Jetton notification path first (like handleTransaction)
+      let forwardComment: string | null = null;
+      let jettonAmount: bigint | null = null;
+      let jettonSender: string | null = null;
+      try {
+        const parsed: { queryId: bigint; amount: bigint; sender: Address | null } | null = (() => {
+          try {
+            const cs = tx.inMessage!.body.beginParse();
+            const op = cs.loadUint(32);
+            if (op !== JETTON_TRANSFER_NOTIFICATION_OP) return null;
+            const q = cs.loadUintBig(64);
+            const amt = cs.loadCoins();
+            const snd = cs.loadAddress();
+            return { queryId: q, amount: amt, sender: snd };
+          } catch {
+            return null;
+          }
+        })();
+        if (parsed) {
+          jettonAmount = parsed.amount;
+          jettonSender = parsed.sender ? parsed.sender.toString() : null;
+          try {
+            const bodySlice = tx.inMessage!.body.beginParse();
+            bodySlice.loadUint(32);
+            bodySlice.loadUintBig(64);
+            bodySlice.loadCoins();
+            bodySlice.loadAddress();
+            if (bodySlice.remainingBits > 0 || bodySlice.remainingRefs > 0) {
+              try {
+                if (bodySlice.remainingRefs > 0) {
+                  const fwd = bodySlice.loadRef().beginParse();
+                  forwardComment = parseTonComment(fwd) ?? parseJettonForwardComment(fwd);
+                } else {
+                  forwardComment = parseTonComment(bodySlice) ?? parseJettonForwardComment(bodySlice);
+                }
+              } catch {
+                forwardComment = null;
+              }
+            }
+          } catch {
+            forwardComment = null;
+          }
+          const dec = decryptCommentString(forwardComment) ?? forwardComment ?? '';
+          const raw = forwardComment ?? '';
+          const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
+          const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
+          const matches =
+            (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+          if (matches && jettonAmount != null && jettonAmount >= expected) {
+            return { found: true, txHash: hash, amount: jettonAmount, src: jettonSender || undefined };
+          }
+          continue;
+        }
+      } catch {
+        // fall through to TON check
+      }
+      if (tx.inMessage.info.type === 'internal') {
+        const value = tx.inMessage.info.value.coins;
+        if (value < expected) continue;
+        let comment: string | null = null;
+        try {
+          comment = parseTonComment(tx.inMessage.body);
+        } catch {
+          comment = null;
+        }
+        const dec = decryptCommentString(comment) ?? comment ?? '';
+        const raw = comment ?? '';
+        const tok = parseDepositToken(dec) ?? parseDepositToken(raw);
+        const legacyId = parseDepositComment(dec) ?? parseDepositComment(raw);
+        const matches =
+          (tok && tokenLower && tok.toLowerCase() === tokenLower) || (legacyId != null && legacyId === deal.id);
+        if (matches && value >= expected) {
+          const srcStr = tx.inMessage.info.src ? tx.inMessage.info.src.toString() : undefined;
+          return { found: true, txHash: hash, amount: value, src: srcStr };
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn(`checkMissedDeposit for deal #${deal.id} failed`, e);
+    return { found: false };
+  }
+  return { found: false };
 }
 
 async function postChatSystemMessage(dealId: number, text: string) {
@@ -139,7 +308,10 @@ async function unknownToAdminsAndSave(info: {
       address: info.address,
       memo: info.memo,
     });
-  } catch {} // best-effort: Telegram notify above already attempted; alert persistence must not break deposit handling.
+  } catch (alertErr) {
+    // P3: Telegram notify above already attempted; log alert-table failure with memo context.
+    logger.warn(`unknown_deposit alert save failed (${info.amount} ${info.asset} ${info.memo.slice(0, 80)})`, alertErr);
+  }
 }
 
 async function notifySellerDeposit(deal: DealRow) {
@@ -155,7 +327,7 @@ async function notifySellerDeposit(deal: DealRow) {
   );
 }
 
-async function processTonDeposit(
+export async function processTonDeposit(
   addr: string,
   src: Address | null,
   value: bigint,
@@ -164,49 +336,112 @@ async function processTonDeposit(
 ) {
   const decrypted = decryptCommentString(comment) ?? comment ?? '';
   const raw = comment ?? '';
-  const dealId = parseDepositComment(decrypted) ?? parseDepositComment(raw);
-
-  if (dealId == null) {
-    let human = '';
-    try {
-      human = fromBaseUnits(value, 'TON');
-    } catch {
-      human = value.toString();
+  // P0-1: try unguessable token first, then legacy escrow#<id> for backward compat
+  const token = parseDepositToken(decrypted) ?? parseDepositToken(raw);
+  let deal: DealRow | null = null;
+  let dealId: number | null = null;
+  if (token) {
+    deal = await findAwaitingDealByToken(token, addr);
+    if (!deal) {
+      let human = '';
+      try {
+        human = fromBaseUnits(value, 'TON');
+      } catch {
+        human = value.toString();
+      }
+      logger.warn(`TON deposit token ${token} to ${addr} — no AWAITING_DEPOSIT deal, ignoring`);
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'TON',
+          address: addr,
+          memo: decrypted || raw || token,
+        });
+      } catch {}
+      return;
     }
-    logger.warn(
-      `Unknown TON deposit to ${addr} value ${value} memo "${decrypted || raw || '(memosiz)'}" — no memo match`,
-    );
-    try {
-      await unknownToAdminsAndSave({
-        amount: human,
-        asset: 'TON',
-        address: addr,
-        memo: decrypted || raw || '(memosiz)',
-      });
-    } catch (e) {
-      logger.warn('unknownDepositToAdmins failed', e);
+  } else {
+    dealId = parseDepositComment(decrypted) ?? parseDepositComment(raw);
+    if (dealId == null) {
+      let human = '';
+      try {
+        human = fromBaseUnits(value, 'TON');
+      } catch {
+        human = value.toString();
+      }
+      logger.warn(
+        `Unknown TON deposit to ${addr} value ${value} memo "${decrypted || raw || '(memosiz)'}" — no memo match`,
+      );
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'TON',
+          address: addr,
+          memo: decrypted || raw || '(memosiz)',
+        });
+      } catch (e) {
+        logger.warn('unknownDepositToAdmins failed', e);
+      }
+      return;
     }
-    return;
+    const legacyDeal = await findAwaitingDealById(dealId, addr);
+    if (!legacyDeal) {
+      let human = '';
+      try {
+        human = fromBaseUnits(value, 'TON');
+      } catch {
+        human = value.toString();
+      }
+      logger.warn(`TON deposit memo escrow#${dealId} to ${addr} — no AWAITING_DEPOSIT deal, ignoring`);
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'TON',
+          address: addr,
+          memo: decrypted || raw || `escrow#${dealId}`,
+        });
+      } catch {}
+      return;
+    }
+    deal = legacyDeal;
   }
 
-  const deal = await findAwaitingDealById(dealId, addr);
-  if (!deal) {
-    let human = '';
+  // P0-1 (b): sender verification — if buyer expected address is known, src must match
+  if (src) {
     try {
-      human = fromBaseUnits(value, 'TON');
-    } catch {
-      human = value.toString();
+      if (await isSenderMismatch(deal, src)) {
+        let human = '';
+        try {
+          human = fromBaseUnits(value, 'TON');
+        } catch {
+          human = value.toString();
+        }
+        const msg = `Sender mismatch Deal #${deal.id}: expected ${deal.buyer_expected_address || 'buyer wallet'} but got ${src.toString()} — flagged for manual review, NOT auto-confirmed`;
+        logger.warn(msg);
+        try {
+          const { saveAdminAlert } = await import('../db/queries');
+          await saveAdminAlert('sender_mismatch', msg, {
+            dealId: deal.id,
+            expected: deal.buyer_expected_address || null,
+            actual: src.toString(),
+            amount: human,
+            asset: 'TON',
+            txHash,
+          });
+        } catch {}
+        try {
+          await unknownToAdminsAndSave({
+            amount: human,
+            asset: 'TON',
+            address: addr,
+            memo: `Sender mismatch Deal #${deal.id}: expected buyer wallet but got ${src.toString()} — manual review required`,
+          });
+        } catch {}
+        return;
+      }
+    } catch (e) {
+      logger.warn(`sender check failed for deal #${deal.id}`, e);
     }
-    logger.warn(`TON deposit memo escrow#${dealId} to ${addr} — no AWAITING_DEPOSIT deal, ignoring`);
-    try {
-      await unknownToAdminsAndSave({
-        amount: human,
-        asset: 'TON',
-        address: addr,
-        memo: decrypted || raw || `escrow#${dealId}`,
-      });
-    } catch {}
-    return;
   }
 
   const assetUpper = String(deal.asset ?? 'TON').toUpperCase();
@@ -302,6 +537,15 @@ async function processTonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
+  // P5-15: capture underpay src for auto-refund after timeout
+  if (src) {
+    try {
+      await db.query(
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
+        [gotHuman, src.toString(), deal.id],
+      );
+    } catch {}
+  }
 }
 
 interface JettonNotification {
@@ -324,7 +568,7 @@ function parseJettonNotification(body: Cell): JettonNotification | null {
   }
 }
 
-async function processJettonDeposit(
+export async function processJettonDeposit(
   addr: string,
   note: JettonNotification,
   forwardComment: string | null,
@@ -332,41 +576,99 @@ async function processJettonDeposit(
 ) {
   const decrypted = decryptCommentString(forwardComment) ?? forwardComment ?? '';
   const raw = forwardComment ?? '';
-  const dealId = parseDepositComment(decrypted) ?? parseDepositComment(raw);
-
-  if (dealId == null) {
-    let human = note.amount.toString();
-    try {
-      human = fromBaseUnits(note.amount, 'USDT');
-    } catch {}
-    logger.warn(`Unknown USDT deposit to ${addr} amount ${note.amount} forward "${decrypted || raw || '(memosiz)'}"`);
-    try {
-      await unknownToAdminsAndSave({
-        amount: human,
-        asset: 'USDT',
-        address: addr,
-        memo: decrypted || raw || '(memosiz)',
-      });
-    } catch {}
-    return;
+  const token = parseDepositToken(decrypted) ?? parseDepositToken(raw);
+  let deal: DealRow | null = null;
+  let dealId: number | null = null;
+  if (token) {
+    deal = await findAwaitingDealByToken(token, addr);
+    if (!deal) {
+      let human = note.amount.toString();
+      try {
+        human = fromBaseUnits(note.amount, 'USDT');
+      } catch {}
+      logger.warn(`USDT deposit token ${token} to ${addr} — no AWAITING_DEPOSIT deal`);
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'USDT',
+          address: addr,
+          memo: decrypted || raw || token,
+        });
+      } catch {}
+      return;
+    }
+  } else {
+    dealId = parseDepositComment(decrypted) ?? parseDepositComment(raw);
+    if (dealId == null) {
+      let human = note.amount.toString();
+      try {
+        human = fromBaseUnits(note.amount, 'USDT');
+      } catch {}
+      logger.warn(`Unknown USDT deposit to ${addr} amount ${note.amount} forward "${decrypted || raw || '(memosiz)'}"`);
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'USDT',
+          address: addr,
+          memo: decrypted || raw || '(memosiz)',
+        });
+      } catch {}
+      return;
+    }
+    const legacyDeal = await findAwaitingDealById(dealId, addr);
+    if (!legacyDeal) {
+      let human = note.amount.toString();
+      try {
+        human = fromBaseUnits(note.amount, 'USDT');
+      } catch {}
+      logger.warn(`USDT deposit forward escrow#${dealId} to ${addr} — no AWAITING_DEPOSIT deal`);
+      try {
+        await unknownToAdminsAndSave({
+          amount: human,
+          asset: 'USDT',
+          address: addr,
+          memo: decrypted || raw || `escrow#${dealId}`,
+        });
+      } catch {}
+      return;
+    }
+    deal = legacyDeal;
   }
 
-  const deal = await findAwaitingDealById(dealId, addr);
-  if (!deal) {
-    let human = note.amount.toString();
+  // P0-1 (b): sender verification for jetton (note.sender is on-chain sender)
+  if (note.sender) {
     try {
-      human = fromBaseUnits(note.amount, 'USDT');
-    } catch {}
-    logger.warn(`USDT deposit forward escrow#${dealId} to ${addr} — no AWAITING_DEPOSIT deal`);
-    try {
-      await unknownToAdminsAndSave({
-        amount: human,
-        asset: 'USDT',
-        address: addr,
-        memo: decrypted || raw || `escrow#${dealId}`,
-      });
-    } catch {}
-    return;
+      if (await isSenderMismatch(deal, note.sender)) {
+        let human = note.amount.toString();
+        try {
+          human = fromBaseUnits(note.amount, 'USDT');
+        } catch {}
+        const msg = `Jetton sender mismatch Deal #${deal.id}: expected ${deal.buyer_expected_address || 'buyer wallet'} but got ${note.sender.toString()} — flagged for manual review, NOT auto-confirmed`;
+        logger.warn(msg);
+        try {
+          const { saveAdminAlert } = await import('../db/queries');
+          await saveAdminAlert('sender_mismatch', msg, {
+            dealId: deal.id,
+            expected: deal.buyer_expected_address || null,
+            actual: note.sender.toString(),
+            amount: human,
+            asset: 'USDT',
+            txHash,
+          });
+        } catch {}
+        try {
+          await unknownToAdminsAndSave({
+            amount: human,
+            asset: 'USDT',
+            address: addr,
+            memo: `Jetton sender mismatch Deal #${deal.id}: expected buyer wallet but got ${note.sender.toString()} — manual review required`,
+          });
+        } catch {}
+        return;
+      }
+    } catch (e) {
+      logger.warn(`jetton sender check failed for deal #${deal.id}`, e);
+    }
   }
 
   const assetUpper = String(deal.asset ?? 'USDT').toUpperCase();
@@ -470,6 +772,15 @@ async function processJettonDeposit(
       memo: `Kam to'lov Deal #${deal.id}: keldi ${gotHuman} kutilgan ${expHuman} memo ${decrypted || raw}`,
     });
   } catch {}
+  // P5-15: capture underpay src for auto-refund after timeout
+  if (note.sender) {
+    try {
+      await db.query(
+        `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || jsonb_build_object('underpay', jsonb_build_object('amount', $1::text, 'src', $2::text, 'at', now()::text)) WHERE id = $3`,
+        [gotHuman, note.sender.toString(), deal.id],
+      );
+    } catch {}
+  }
 }
 
 async function handleTransaction(addr: string, tx: Transaction) {

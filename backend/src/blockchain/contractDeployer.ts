@@ -1,9 +1,8 @@
 /**
- * Deploys Escrow contracts via the isolated W5 signer microservice.
- *
- * Guards: refuses to run without signer (SIGNER_URL + SIGNER_API_KEY), a
- * compiled code BOC (ESCROW_CONTRACT_CODE_HEX) and admin/fee addresses —
- * every failure mode throws a descriptive `deploy_not_configured: …` error.
+ * LEGACY — deploy helper for a Tact Escrow contract that does not exist in
+ * this repo. Custody is off-chain in the signer W5 wallet; this module is
+ * kept for API compatibility and always throws `deploy_not_configured`
+ * unless someone wires a real code BOC. Do not call it in the deal flow.
  *
  * Deployment body: the Deployable trait expects Deploy{queryId}, i.e.
  * op = 0x00000000 (u32) followed by queryId (u64).
@@ -47,7 +46,7 @@ export async function deployEscrowContract(
   const codeHex = config.escrowContractCodeHex || ESCROW_CODE_HEX;
   if (!codeHex) {
     throw new Error(
-      'deploy_not_configured: ESCROW_CONTRACT_CODE_HEX is empty — compile contracts/Escrow.tact and provide the code BOC hex',
+      'deploy_not_configured: ESCROW_CONTRACT_CODE_HEX is empty — no on-chain escrow contract exists in this repo (custodial off-chain model)',
     );
   }
   if (!config.adminAddress || !config.feeAddress) {

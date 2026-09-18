@@ -13,6 +13,11 @@ async function main() {
   const errs = validateConfig();
   if (errs.length) {
     for (const e of errs) logger.warn(e);
+    // Fail-closed ENCRYPTION_KEY in ALL environments (BREAKING vs old warn-only dev fallback).
+    if (errs.some((e) => e.includes('ENCRYPTION_KEY'))) {
+      logger.error('ubot misconfigured — ENCRYPTION_KEY required (64 hex); refusing to boot plaintext. Exiting');
+      process.exit(1);
+    }
     if (config.isProduction && errs.some((e) => e.includes('API_ID') || e.includes('API_HASH'))) {
       logger.error('ubot misconfigured in production — API_ID/HASH required; exiting');
       process.exit(1);

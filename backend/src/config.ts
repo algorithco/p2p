@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import nodeCrypto from 'crypto';
 dotenv.config();
 
 export const config = {
@@ -38,14 +39,21 @@ export const config = {
   })(),
   adminAddress: process.env.ADMIN_ADDRESS || '',
   apiKey: process.env.API_KEY || undefined,
+  adminApiKey: process.env.ADMIN_API_KEY || undefined,
   webappUrl: process.env.WEBAPP_URL || '',
   frontendUrl: process.env.FRONTEND_URL || process.env.WEBAPP_URL || 'http://localhost:8080',
   serveStatic: process.env.SERVE_STATIC === 'true',
   toncenterApiKey: process.env.TONCENTER_API_KEY || '',
   requireOnchain: process.env.REQUIRE_ONCHAIN === 'true',
   walletAddress: process.env.WALLET_ADDRESS || '',
-  // Seller-buyer chat E2E encryption: 64 hex chars (32 bytes) for AES-256-GCM. Must match ubot/utradebot when shared.
-  // Generate: openssl rand -hex 32  (or PowerShell: -join (0..31 | % { "{0:X2}" -f (Get-Random -Max 256) }))
+  // ENCRYPTION_KEY sharing model (do not "fix" by giving each service its own key):
+  // - MUST equal utradebot's ENCRYPTION_KEY: backend writes
+  //   utrade_trades.session_encrypted (POST /api/utrade/trades) and utradebot
+  //   decrypts it (sellFlow/codeHandler via sessionCrypto.decryptSession).
+  //   Mismatched keys = undecryptable sessions = broken webapp-created trades.
+  // - ubot's key is INDEPENDENT (protects only ubot's own session file).
+  // Generate ONE value with `openssl rand -hex 32` and put the SAME value in
+  // backend/.env and utradebot/.env (64 hex chars; 128 hex also accepted).
   encryptionKey: process.env.ENCRYPTION_KEY || '',
   // Internal microservices (proxied via backend, keep host-bound)
   ubotUrl: process.env.UBOT_URL || 'http://ubot:3002',
@@ -62,6 +70,36 @@ if (!config.databaseUrl) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[config] DATABASE_URL is required in production — refusing to boot fail-open');
   }
+}
+export function isValidEncryptionKey(v?: string): boolean {
+  const s = String(v ?? config.encryptionKey ?? '').trim();
+  return /^[0-9a-fA-F]{64}$/.test(s) || /^[0-9a-fA-F]{128}$/.test(s);
+}
+/**
+ * Fail-closed ENCRYPTION_KEY gate for boot — ALL environments (not just prod).
+ * Chat keys, memos and phone fields must never silently fall back to plaintext
+ * in a money-moving service. Generate with `openssl rand -hex 32` (64 hex).
+ * Throws on missing/malformed key; call at service boot (not at import so
+ * unit tests can import config without a real key).
+ */
+export function assertEncryptionKey(): void {
+  if (!isValidEncryptionKey()) {
+    throw new Error(
+      '[config] ENCRYPTION_KEY is required and must be 64 hex chars (openssl rand -hex 32; 128 hex also accepted and hashed) — refusing to boot rather than store chat keys/memos in plaintext',
+    );
+  }
+}
+/**
+ * Non-secret key fingerprint for cross-service comparison (sha256, first 16
+ * hex chars). Logging the fingerprint is safe (no preimage from 256-bit key
+ * material). Operator check: backend and utradebot fingerprints MUST match;
+ * compare the two services' boot logs. A mismatch means utradebot cannot
+ * decrypt backend-written utrade sessions (live breakage).
+ */
+export function encryptionKeyFingerprint(v?: string): string {
+  const s = String(v ?? config.encryptionKey ?? '').trim();
+  if (!s) return 'unset';
+  return nodeCrypto.createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);
 }
 if (
   config.encryptionKey &&

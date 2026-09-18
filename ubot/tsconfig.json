@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "sourceMap": true,
     "declaration": true,
-    "noUnusedLocals": false,
+    "noUnusedLocals": true,
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src/**/*"],

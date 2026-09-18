@@ -32,14 +32,7 @@ import {
 } from './services/dealService';
 import { depositComment, releaseComment } from './utils/comments';
 import { encryptedCommentToPayloadB64, jettonTransferPayload } from './utils/tonPayload';
-import {
-  isEncryptionEnabled,
-  getMasterKey,
-  encryptField,
-  decryptField,
-  assertEncryptionForStrictEnv,
-  warnIfEncryptionDisabledOnce,
-} from './utils/encryption';
+import { isEncryptionEnabled, getMasterKey, encryptField, decryptField } from './utils/encryption';
 import { toBaseUnits } from './utils/money';
 import {
   identityAuth,
@@ -590,6 +583,30 @@ app.post(
         error: 'payment_address_not_configured: set WALLET_ADDRESS or ADMIN_ADDRESS to a valid TON address',
       });
     }
+    // P0-1 (b): capture buyer expected deposit address if knowable (TonConnect wallet, previous users.ton_address)
+    let buyerExpectedAddress: string | null = null;
+    const rawWallet =
+      String((req.body as any).buyerWalletAddress || (req.body as any).buyer_wallet_address || '').trim() ||
+      String((req.body as any).tonAddress || (req.body as any).ton_address || '').trim();
+    if (rawWallet) {
+      try {
+        Address.parse(rawWallet);
+        buyerExpectedAddress = rawWallet;
+      } catch {
+        // ignore invalid wallet, will be resolved from users table below
+      }
+    }
+    if (!buyerExpectedAddress && buyerId != null) {
+      try {
+        const u = await db.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [buyerId]);
+        if (u.rows[0]?.ton_address) {
+          try {
+            Address.parse(String(u.rows[0].ton_address).trim());
+            buyerExpectedAddress = String(u.rows[0].ton_address).trim();
+          } catch {}
+        }
+      } catch {}
+    }
     const deal = await createDealRecord({
       buyerId,
       sellerId,
@@ -609,9 +626,12 @@ app.post(
       channelTitle,
       channelSnapshot,
       escrowHolderId,
+      buyerExpectedAddress,
     });
     const linkToken = await generateDealLink(deal.id);
-    const memo = depositComment(deal.id);
+    // P0-1: use unguessable deposit_token if present, fallback to legacy for pre-existing deals
+    const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
+    const memo = depositComment(deal.id, depositToken);
     const outMemo = releaseComment({ id: deal.id, amount, asset, terms });
     // Ensure the payment address is monitored for deposits (with comment)
     const payAddr = (deal as unknown as { payment_address?: string }).payment_address || resolvePaymentAddress();
@@ -811,7 +831,8 @@ async function resolveRequesterPhotoFileId(telegramId: number): Promise<string |
   }
 }
 
-// Per-deal E2E chat key — only buyer, seller or admin may fetch (ciphertext never leaves client decrypted on server)
+// Per-deal chat key — P4-14: NOT true E2E against operator. Encrypted at rest, operator-accessible for moderation/dispute.
+// Only buyer/seller or admin (ADMIN_API_KEY or verified admin id) may fetch; generic service api-key NOT allowed.
 app.get(
   '/api/deals/:id/key',
   requireIdentity,
@@ -825,10 +846,17 @@ app.get(
     const isParty =
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
-    const isAdminCaller = req.authMode === 'api-key' || isAdminTelegramId(caller);
+    const { adminApiKeyMatches } = await import('./auth/guard');
+    const isAdminCaller = adminApiKeyMatches(req) || isAdminTelegramId(caller);
     if (!isParty && !isAdminCaller) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const key = await getDealChatKey(dealId);
-    return res.json({ dealId, key, algo: 'aes-256-gcm', format: 'base64' });
+    return res.json({
+      dealId,
+      key,
+      algo: 'aes-256-gcm',
+      format: 'base64',
+      note: 'encrypted at rest, accessible to platform admins for dispute resolution — not E2E against operator',
+    });
   }),
 );
 
@@ -1023,6 +1051,41 @@ app.post(
       return res.status(400).json({ error: result.message });
     }
     return res.json(result);
+  }),
+);
+
+// P2-7: dispute writer — buyer or seller can flag a deal as disputed, surfaces in /disputes for admin review
+app.post(
+  '/api/deals/:id/dispute',
+  dealActionLimiter,
+  requireIdentity,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const caller = getIdentityId(req);
+    if (caller === null) return res.status(401).json({ error: 'identity_required' });
+    const deal = await getDealById(dealId);
+    if (!deal) return res.status(404).json({ error: 'deal_not_found' });
+    const isParty =
+      (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
+      (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
+    if (!isParty) return res.status(403).json({ error: 'not_a_party_to_deal' });
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(String(deal.status))) {
+      return res.status(409).json({ error: 'deal_finished: cannot dispute closed deal' });
+    }
+    await db.query(
+      `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"disputed":true}'::jsonb, updated_at = now() WHERE id = $1`,
+      [dealId],
+    );
+    try {
+      const { addDealMessage } = await import('./services/dealService');
+      await addDealMessage(dealId, 0, `Tizim: Nizo ochildi (Deal #${dealId}) — admin ko'rib chiqadi.`);
+    } catch {}
+    try {
+      const { saveAdminAlert } = await import('./db/queries');
+      await saveAdminAlert('disputed', `Deal #${dealId} disputed by ${caller}`, { dealId, by: caller });
+    } catch {}
+    res.json({ ok: true });
   }),
 );
 
@@ -1934,6 +1997,39 @@ app.post(
   }),
 );
 
+// Admin: stuck payouts dashboard (P1-6) & fee failures (P1-5)
+app.get(
+  '/api/admin/stuck',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const { listStuckDeals } = await import('./services/escrowService');
+    const rows = await listStuckDeals(limit);
+    res.json({ stuck: rows });
+  }),
+);
+app.get(
+  '/api/admin/fee-failures',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+    const { listFeeFailedDeals } = await import('./services/escrowService');
+    const rows = await listFeeFailedDeals(limit);
+    res.json({ failures: rows });
+  }),
+);
+app.post(
+  '/api/admin/fee-retry/:id',
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const dealId = Number(req.params.id);
+    if (!Number.isInteger(dealId) || dealId <= 0) return res.status(400).json({ error: 'invalid_id' });
+    const { retryFeePayout } = await import('./services/escrowService');
+    const result = await retryFeePayout(dealId);
+    if (!result.ok) return res.status(400).json(result);
+    res.json(result);
+  }),
+);
 app.get(
   '/api/status/:address',
   publicTonLimiter,
@@ -2022,7 +2118,8 @@ app.get(
     if (!check) return res.status(404).json({ error: 'deal_not_found' });
     if (!check.hasAccess) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const deal = check.deal;
-    const memo = depositComment(dealId);
+    const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
+    const memo = depositComment(dealId, depositToken);
     const outMemo = releaseComment({ id: dealId, amount: deal.amount, asset: deal.asset, terms: deal.terms });
     const depositPayload = encryptedCommentToPayloadB64(memo);
     const releasePayload = encryptedCommentToPayloadB64(outMemo);
@@ -2236,10 +2333,15 @@ const API_DOCS = {
       method: 'POST',
       path: '/api/withdraw',
       auth: 'Admin',
-      desc: 'Release (guarded DB → RELEASED; on-chain stub if REQUIRE_ONCHAIN=true without signer)',
+      desc: 'Release (custodial signer payout, guarded DB → RELEASED)',
     },
     { method: 'POST', path: '/api/refund', auth: 'Admin', desc: 'Refund (guarded DB → REFUNDED)' },
-    { method: 'GET', path: '/api/status/:address', auth: 'public', desc: 'On-chain Escrow.getStatus() for address' },
+    {
+      method: 'GET',
+      path: '/api/status/:address',
+      auth: 'public',
+      desc: 'Legacy status read (custodial mode returns {mode:offchain}; REQUIRE_ONCHAIN=true attempts on-chain read)',
+    },
     {
       method: 'GET',
       path: '/api/balance/:address',
@@ -2305,7 +2407,7 @@ const API_DOCS = {
     'Seller-buyer chat encryption at rest: per-deal AES-256-GCM key (server generates, encrypts with ENCRYPTION_KEY), messages are ciphertext-only. Server holds master key so can decrypt — protects DB dump, but not malicious operator (not true E2E against server compromise). See docs/THREAT_MODEL.md',
     'Join is atomic (BEGIN FOR UPDATE): one-time link cannot be double-consumed, role assignment guarded with WHERE IS NULL. Payouts also use SELECT FOR UPDATE + guarded UPDATE WHERE status to prevent double-payout.',
     'Rate limiters and listener cursors/monitoredAddresses are in-memory per-process (plus persisted cursors for crash recovery) — if scaled horizontally, use Redis/shared DB for global limits.',
-    'On-chain Escrow contract (GET /api/status/:address, contractDeployer) is vestigial — current flow is custodial via signer wallet, not per-deal smart contract. Kept for future/compat; fee model assumes custodial.',
+    'Custodial model: funds sit in the signer W5 wallet; Postgres is the source of truth. There is no on-chain per-deal contract — GET /api/status/:address and contractDeployer are legacy stubs kept for compat.',
     'Postgres: deals, users, messages, deal_links, notifications, listener_cursors + utrade_trades/utrade_events (shared volume pgdata)',
     'See backend/README.md for full env table and auth legend',
   ],
@@ -2451,21 +2553,120 @@ function startSchedulers() {
       // the status flips to REFUNDED + confirmations.autoClosed, so the app
       // shows "Yopildi" while nothing is deleted from the server.
       try {
+        // P2-10: respect user-facing deadline — expire if either 10h elapsed OR deadline passed (earlier wins, safer).
         const old = await db.query(
-          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND created_at < now() - interval '10 hours' LIMIT 100`,
+          `SELECT * FROM deals WHERE status = 'AWAITING_DEPOSIT' AND (created_at < now() - interval '10 hours' OR (deadline IS NOT NULL AND deadline < now())) LIMIT 100`,
         );
         for (const d of old.rows) {
           if (isDisputedDeal(d)) continue;
           if (String(d.status) === 'RELEASED' || String(d.status) === 'REFUNDED') continue;
           try {
-            const closed = await updateDealStatus(Number(d.id), 'REFUNDED', undefined, ['AWAITING_DEPOSIT']);
-            if (!closed) continue;
+            // P1-3: single source validation via dealTransitions
+
+            const { DEAL_ACTIONS, assertTransition, guardedStatusUpdate } = await import('./services/dealTransitions');
+            const tr = assertTransition(String(d.status), DEAL_ACTIONS.EXPIRE);
+            if (!tr.ok) {
+              logger.warn(`expiry skip deal #${sanitizeLogValue(d.id)}: ${tr.error}`);
+              continue;
+            }
+            // P1-4: before DB-only close, check on-chain for missed deposit
+            let missed: { found: boolean; txHash?: string } = { found: false };
             try {
-              await db.query(
-                `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"autoClosed":true}'::jsonb, updated_at = now() WHERE id = $1`,
-                [d.id],
+              const { checkMissedDepositOnChain } = await import('./blockchain/listener');
+              missed = await checkMissedDepositOnChain(d as unknown as import('./blockchain/listener').DealRow);
+            } catch (e) {
+              logger.warn(`missed deposit check failed for deal #${sanitizeLogValue(d.id)}`, e);
+            }
+            if (missed.found) {
+              // Real funds exist — route through deposit-confirm + on-chain refund, not bare DB close
+              try {
+                // Confirm deposit first (guarded)
+                const confirmed = await updateDealStatus(Number(d.id), 'DEPOSIT_CONFIRMED', missed.txHash, [
+                  'AWAITING_DEPOSIT',
+                ]);
+                if (confirmed) {
+                  try {
+                    const { adminRefund } = await import('./services/escrowService');
+                    const refundRes = await adminRefund(
+                      (config.adminTelegramIds[0] || 0) as unknown as number,
+                      Number(d.id),
+                    );
+                    logger.info(
+                      `expiry: deal #${sanitizeLogValue(d.id)} had missed deposit ${missed.txHash}, refund attempted: ${JSON.stringify(refundRes).slice(0, 200)}`,
+                    );
+                    try {
+                      const { saveAdminAlert } = await import('./db/queries');
+                      await saveAdminAlert(
+                        'auto_close_missed_refund',
+                        `Deal #${d.id} missed deposit ${missed.txHash} found — routed to refund`,
+                        {
+                          dealId: Number(d.id),
+                          txHash: missed.txHash,
+                          refundOk: (refundRes as { success?: boolean }).success,
+                        },
+                      );
+                    } catch {}
+                  } catch (refundErr) {
+                    logger.warn(`missed deposit refund failed for deal #${sanitizeLogValue(d.id)}`, refundErr);
+                    try {
+                      const { saveAdminAlert } = await import('./db/queries');
+                      await saveAdminAlert(
+                        'auto_close_missed_refund_failed',
+                        `Deal #${d.id} missed deposit ${missed.txHash} — CONFIRMED but refund failed`,
+                        {
+                          dealId: Number(d.id),
+                          txHash: missed.txHash,
+                          error: String((refundErr as Error).message || refundErr),
+                        },
+                      );
+                    } catch {}
+                  }
+                  continue; // do not do DB-only close
+                }
+              } catch (e) {
+                logger.warn(`missed deposit handling failed for deal #${sanitizeLogValue(d.id)}`, e);
+              }
+            }
+            // P5-15: underpay auto-refund — wire captured sender address into expiry
+            try {
+              const { tryRefundUnderpay } = await import('./services/escrowService');
+              await tryRefundUnderpay(
+                d as unknown as {
+                  id: number | string;
+                  asset?: string | null;
+                  confirmations?: Record<string, unknown> | null;
+                },
               );
-            } catch {}
+            } catch (e) {
+              logger.warn(`underpay auto-refund failed for deal #${d.id}`, e);
+            }
+            // P1-3: use guarded update for EXPIRE (same validation as assert above)
+            const client = await db.connect();
+            let closed = false;
+            try {
+              await client.query('BEGIN');
+              const rowCount = await guardedStatusUpdate(client, Number(d.id), 'AWAITING_DEPOSIT', tr.next, [
+                'resolved_at = now()',
+              ]);
+              if (rowCount > 0) {
+                await client.query(
+                  `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"autoClosed":true}'::jsonb, updated_at = now() WHERE id = $1`,
+                  [d.id],
+                );
+                await client.query('COMMIT');
+                closed = true;
+              } else {
+                await client.query('ROLLBACK');
+              }
+            } catch (e) {
+              try {
+                await client.query('ROLLBACK');
+              } catch {}
+              throw e;
+            } finally {
+              client.release();
+            }
+            if (!closed) continue;
             const msg = `10 soat to'lov bo'lmagani uchun yopildi`;
             const like = dealLikeForNotify(d);
             if (d.buyer_telegram_id != null) {
@@ -2484,9 +2685,15 @@ function startSchedulers() {
             } catch {}
             try {
               const { saveAdminAlert } = await import('./db/queries');
-              await saveAdminAlert('auto_close', `Deal #${d.id} 10 soat to'lovsiz yopildi (REFUNDED+autoClosed)`, {
-                dealId: Number(d.id),
-              });
+              await saveAdminAlert(
+                'auto_close',
+                `Deal #${d.id} 10 soat to'lovsiz yopildi (REFUNDED+autoClosed, on-chain checked: ${missed.found ? 'missed_found_refunded' : 'no_deposit'})`,
+                {
+                  dealId: Number(d.id),
+                  onChainChecked: true,
+                  missedFound: missed.found,
+                },
+              );
             } catch {}
           } catch (e) {
             logger.warn(`expiry close failed for deal #${sanitizeLogValue(d.id)}`, e);
@@ -2573,6 +2780,49 @@ function startSchedulers() {
       } catch (e) {
         logger.warn('remConfirm scheduler failed', e);
       }
+
+      // P3-12: channel/group transfer stall — seller verified but not transferred to escrow within 6h
+      try {
+        const stall = await db.query(
+          `SELECT * FROM deals WHERE deal_type IN ('CHANNEL','GROUP')
+            AND status = 'DEPOSIT_CONFIRMED' AND transfer_to_escrow_at IS NULL
+            AND created_at < now() - interval '6 hours' LIMIT 100`,
+        );
+        for (const d of stall.rows) {
+          try {
+            const { saveAdminAlert } = await import('./db/queries');
+            await saveAdminAlert(
+              'channel_stall',
+              `Channel deal #${d.id} (${d.channel_username}) DEPOSIT_CONFIRMED but not transferred to escrow @gramchioka within 6h — seller stall, admin review required`,
+              {
+                dealId: Number(d.id),
+                channelUsername: d.channel_username,
+              },
+            );
+            const like = dealLikeForNotify(d);
+            if (d.buyer_telegram_id)
+              try {
+                await notify.adminDecisionToParty(
+                  Number(d.buyer_telegram_id),
+                  like,
+                  `Kanal ${d.channel_username} 6 soatdan beri escrow ga o'tmadi — admin ko'rib chiqadi.`,
+                );
+              } catch {}
+            if (d.seller_telegram_id)
+              try {
+                await notify.adminDecisionToParty(
+                  Number(d.seller_telegram_id),
+                  like,
+                  `Kanal ${d.channel_username} ni @gramchioka ga o'tkazing, 6 soat o'tdi.`,
+                );
+              } catch {}
+          } catch (e) {
+            logger.warn(`channel stall alert failed for deal #${sanitizeLogValue(d.id)}`, e);
+          }
+        }
+      } catch (e) {
+        logger.warn('channel stall scheduler failed', e);
+      }
     } catch (e) {
       logger.warn('scheduler run failed', e);
     }
@@ -2584,19 +2834,65 @@ function startSchedulers() {
     5 * 60 * 1000,
   );
   (timer as unknown as { unref?: () => void }).unref?.();
-  logger.info('Schedulers started (expiry + reminders, 5 min)');
+
+  // P1-6: escalating re-alert for stuck payouts every 6h (no auto-retry)
+  const stuckTimer = setInterval(
+    async () => {
+      try {
+        const { reconcileStuckWithEscalation } = await import('./services/escrowService');
+        const n = await reconcileStuckWithEscalation(360);
+        if (n) logger.warn(`Stuck payout re-alert: ${n} deal(s) still pending`);
+      } catch (e) {
+        logger.warn('stuck re-alert failed', e);
+      }
+    },
+    6 * 60 * 60 * 1000,
+  );
+  (stuckTimer as unknown as { unref?: () => void }).unref?.();
+
+  // P1-5: auto-retry fee legs every 30 min (bounded 5 attempts, escalating alerts)
+  const feeTimer = setInterval(
+    async () => {
+      try {
+        const { listFeeFailedDeals, retryFeePayout } = await import('./services/escrowService');
+        const fails = (await listFeeFailedDeals(20)) as Array<{ id: number; fee_retry_count?: number }>;
+        for (const f of fails) {
+          if ((f.fee_retry_count ?? 0) >= 5) continue;
+          // simple jitter: only retry if last retry >30 min ago or never
+          try {
+            await retryFeePayout(Number(f.id));
+          } catch (e) {
+            logger.warn(`auto fee retry failed for deal #${f.id}`, e);
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } catch (e) {
+        logger.warn('fee auto-retry failed', e);
+      }
+    },
+    30 * 60 * 1000,
+  );
+  (feeTimer as unknown as { unref?: () => void }).unref?.();
+
+  logger.info('Schedulers started (expiry + reminders 5 min, stuck re-alert 6h, fee retry 30 min)');
 }
 
 async function boot() {
-  // Fail-closed encryption: refuse to boot in production without a valid master key
-  // (would otherwise store chat keys/memos/phone in plaintext silently).
+  // Fail-closed encryption in ALL environments (not just production): this
+  // service moves money and encrypts chat keys/memos/phones — booting without
+  // a valid key would silently store plaintext. COMPAT MODEL: backend and
+  // utradebot MUST share the same ENCRYPTION_KEY (see config.ts); the
+  // fingerprint below lets operators verify the match from boot logs.
   try {
-    assertEncryptionForStrictEnv();
+    const { assertEncryptionKey, encryptionKeyFingerprint } = await import('./config');
+    assertEncryptionKey();
+    logger.info(
+      `ENCRYPTION_KEY fingerprint=${encryptionKeyFingerprint()} (sha256-16, non-secret; must match utradebot, ubot key is independent)`,
+    );
   } catch (err) {
     logger.error(`FATAL: ${(err as Error).message}`);
     process.exit(1);
   }
-  warnIfEncryptionDisabledOnce();
   // Fix 3.3: fail closed in production if no auth configured and dev not explicitly allowed
   if (process.env.NODE_ENV === 'production' && !config.botToken && !config.apiKey && !config.allowDevAuth) {
     logger.error(

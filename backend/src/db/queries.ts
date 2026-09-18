@@ -126,6 +126,17 @@ export async function ensureTables() {
   await ensureColumn('deals', 'payout_attempted_at TIMESTAMPTZ');
   await ensureColumn('deals', 'fee_payout_failed BOOLEAN DEFAULT false');
   await ensureColumn('deals', 'fee_payout_error TEXT');
+  await ensureColumn('deals', 'fee_retry_count INT DEFAULT 0');
+  await ensureColumn('deals', 'fee_last_retry_at TIMESTAMPTZ');
+  // P0-1 deposit token + buyer expected address for sender verification
+  await ensureColumn('deals', 'deposit_token TEXT');
+  await ensureColumn('deals', 'buyer_expected_address TEXT');
+  // unique index for deposit token (partial, only where not null)
+  try {
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_deals_deposit_token ON deals(deposit_token) WHERE deposit_token IS NOT NULL AND deposit_token <> ''`,
+    );
+  } catch {}
   await pool.query("UPDATE deals SET deal_type='P2P' WHERE deal_type IS NULL");
   await pool.query('CREATE INDEX IF NOT EXISTS idx_deals_type ON deals(deal_type)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_deals_channel_id ON deals(channel_id) WHERE channel_id IS NOT NULL');
@@ -184,12 +195,15 @@ export async function ensureTables() {
     }
   }
 
-  // Defense-in-depth: restrict deals.status to the canonical enum (incl. transient
-  // payout PENDING states from group A). NOTE: Postgres has no
-  // `ADD CONSTRAINT IF NOT EXISTS`, so same try/catch pattern as above.
+  // Defense-in-depth: restrict deals.status to canonical enum. P2-8: BUYER_CONFIRMED removed from valid set (dead, never written).
+  // Legacy rows with BUYER_CONFIRMED remain readable but new writes must not produce it.
+  try {
+    // Attempt to migrate old constraint that included BUYER_CONFIRMED: drop if exists then add new
+    await pool.query(`ALTER TABLE deals DROP CONSTRAINT IF EXISTS chk_deals_status`);
+  } catch {}
   try {
     await pool.query(`ALTER TABLE deals ADD CONSTRAINT chk_deals_status CHECK (status IN (
-      'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT','BUYER_CONFIRMED',
+      'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT',
       'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED'
     ))`);
   } catch (e) {

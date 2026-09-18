@@ -32,11 +32,17 @@ export function encryptSession(plain: string): string {
 export function decryptSession(encB64: string): string {
   const key = getKey();
   if (!key) return encB64;
-  // Try to detect if already plain (not base64 of iv+tag+enc)
+  const raw = String(encB64 || '');
+  let buf: Buffer;
   try {
-    const buf = Buffer.from(encB64, 'base64');
-    if (buf.length < 28) return encB64;
-    // Heuristic: plain StringSessions start with "1" and are longer than 100 chars but our enc is also base64; try decrypt
+    buf = Buffer.from(raw, 'base64');
+  } catch {
+    return raw;
+  }
+  // Too short to be one of our blobs (iv 12 + tag 16 + >=1 cipher byte) —
+  // treat as plaintext (phone numbers, short placeholders).
+  if (buf.length < 28) return raw;
+  try {
     const iv = buf.subarray(0, 12);
     const tag = buf.subarray(12, 28);
     const enc = buf.subarray(28);
@@ -44,11 +50,20 @@ export function decryptSession(encB64: string): string {
     decipher.setAuthTag(tag);
     const dec = Buffer.concat([decipher.update(enc), decipher.final()]);
     const res = dec.toString('utf8');
-    // If decrypted looks like session (or at least non-empty), return it; else fallback to original
-    if (res && res.length > 10) return res;
-    return encB64;
+    if (res) return res;
+    return raw;
   } catch {
-    return encB64;
+    // GCM auth failed: either a legacy PLAINTEXT session or a blob encrypted
+    // under a DIFFERENT key (backend and utradebot MUST share ENCRYPTION_KEY —
+    // see ../config.ts). Plaintext StringSessions always start with '1' and are
+    // long; anything else that fails auth is undecryptable here. Throw instead
+    // of returning the ciphertext — propagating the blob into StringSession()
+    // fails later at Telegram with a misleading error and hides key mismatches.
+    if (raw.length > 100 && raw.startsWith('1')) return raw;
+    throw new Error(
+      'session decryption failed — key mismatch or invalid session ' +
+        '(AES-256-GCM auth failed; backend and utradebot MUST share the same ENCRYPTION_KEY)',
+    );
   }
 }
 

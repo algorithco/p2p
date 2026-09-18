@@ -11,7 +11,7 @@
 // released.
 //
 // Pure module: no DB imports at the top level, so it is unit-testable
-// without Postgres (see tests/dealTransitions.test.ts).
+// without Postgres (see ./dealTransitions.test.ts).
 import { DEAL_STATUS } from './dealService';
 
 export const DEAL_ACTIONS = {
@@ -39,13 +39,11 @@ export const TRANSITION_TABLE: Record<DealAction, ReadonlyArray<string>> = {
   [DEAL_ACTIONS.DEPOSIT_DETECTED]: [DEAL_STATUS.AWAITING_DEPOSIT],
   [DEAL_ACTIONS.MARK_SHIPPED]: [DEAL_STATUS.DEPOSIT_CONFIRMED],
   [DEAL_ACTIONS.CONFIRM_RECEIPT]: [DEAL_STATUS.ITEM_SENT],
-  [DEAL_ACTIONS.RELEASE]: [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT, DEAL_STATUS.BUYER_CONFIRMED],
-  [DEAL_ACTIONS.REFUND]: [
-    DEAL_STATUS.AWAITING_DEPOSIT,
-    DEAL_STATUS.DEPOSIT_CONFIRMED,
-    DEAL_STATUS.ITEM_SENT,
-    DEAL_STATUS.BUYER_CONFIRMED,
-  ],
+  // P2-8: BUYER_CONFIRMED removed — dead state no longer produced, kept only for legacy row tolerance in DB but not as valid transition source.
+  [DEAL_ACTIONS.RELEASE]: [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT],
+  // REFUND with money movement must NOT be from AWAITING_DEPOSIT (no funds to return on-chain).
+  // Use EXPIRE for DB-only close of AWAITING_DEPOSIT (no on-chain leg). Strict consolidation P1-3.
+  [DEAL_ACTIONS.REFUND]: [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT],
   [DEAL_ACTIONS.EXPIRE]: [DEAL_STATUS.AWAITING_DEPOSIT],
 };
 

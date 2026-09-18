@@ -29,6 +29,10 @@ export const config = {
   sessionString: str(process.env.UBOT_SESSION_STRING, ''),
   phone: str(process.env.UBOT_PHONE, ''),
   twoFaPassword: str(process.env.TWO_FA_PASSWORD, ''),
+  // INDEPENDENT key: protects only ubot's own session file
+  // (sessions/ubot.session.enc) and UBOT_SESSION_STRING. It does NOT need to
+  // match backend/utradebot — ubot reads no shared encrypted columns (unlike
+  // backend<->utradebot, which MUST share one key for utrade sessions).
   encryptionKey: str(process.env.ENCRYPTION_KEY, ''),
   port: num(process.env.PORT, 3002),
   apiKey: str(process.env.UBOT_API_KEY, ''),
@@ -197,6 +201,17 @@ export function validateConfig(): string[] {
     }
     if (!Number.isInteger(config.port) || config.port < 1024 || config.port > 65535) {
       if (!errs.some((e) => e.includes('PORT'))) errs.push('PORT must be 1024-65535');
+    }
+  }
+
+  // Fail-closed ENCRYPTION_KEY in ALL environments (money/account-custody
+  // service must never silently store sessions plaintext). Generate with
+  // `openssl rand -hex 32`.
+  if (!config.encryptionKey) {
+    errs.push('ENCRYPTION_KEY is required (64 hex chars, openssl rand -hex 32) — refusing plaintext sessions');
+  } else if (!/^([a-fA-F0-9]{64}|[a-fA-F0-9]{128})$/.test(config.encryptionKey)) {
+    if (!errs.some((e) => e.includes('ENCRYPTION_KEY'))) {
+      errs.push('ENCRYPTION_KEY must be 64 hex chars (32 bytes) or 128 hex (64 bytes, will be hashed to 32)');
     }
   }
 

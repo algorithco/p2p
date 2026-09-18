@@ -24,7 +24,14 @@ export function createClientFromSession(sessionEncryptedOrPlain: string): Telegr
 export async function validateSession(
   sessionEnc: string,
 ): Promise<{ ok: boolean; phone?: string; username?: string; error?: string }> {
-  const client = createClientFromSession(sessionEnc);
+  let client: TelegramClient;
+  try {
+    client = createClientFromSession(sessionEnc);
+  } catch (e) {
+    // Includes undecryptable blobs (e.g. wrong ENCRYPTION_KEY) — surface the
+    // diagnosable message instead of crashing the handler.
+    return { ok: false, error: String((e as Error).message || e) };
+  }
   try {
     await client.connect();
     const authorized = await client.checkAuthorization();

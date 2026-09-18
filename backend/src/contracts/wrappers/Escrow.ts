@@ -1,9 +1,12 @@
 /**
- * TypeScript bindings for contracts/Escrow.tact (Tact ^1.5).
+ * LEGACY stub — TypeScript cell helpers once intended for a Tact Escrow contract.
  *
- * The compiled code BOC is NOT committed to the repo: inject it at deploy time
- * via the ESCROW_CONTRACT_CODE_HEX environment variable (see backend
- * src/blockchain/contractDeployer.ts) or pass a `code` Cell directly.
+ * There is no `contracts/Escrow.tact` in this repo and no on-chain per-deal
+ * escrow: custody is entirely off-chain in the signer W5 wallet with Postgres
+ * as the source of truth. This file is kept only because
+ * `blockchain/contractDeployer.ts` and `index.ts` import its pure cell
+ * builders; ESCROW_CODE_HEX stays empty and any deploy path throws
+ * `deploy_not_configured`. Do not present this as deployed on-chain escrow.
  *
  * Init-data layout mirrors the Tact init() signature EXACTLY, order matters:
  *   uint64 dealId | Address buyer | Address seller | Address admin |
@@ -16,7 +19,7 @@
  */
 import { Address, Builder, beginCell, Cell, Contract, ContractProvider, contractAddress } from '@ton/core';
 
-/** Placeholder until `tact build` output is wired through env/config. */
+/** Placeholder — stays empty (no Tact build is wired; see header). */
 export const ESCROW_CODE_HEX = '';
 
 /** message(0x65787464) ExtendDeadline { newDeadline: Int as uint32 } */
@@ -68,7 +71,7 @@ function storeMaybeAddr(builder: Builder, addr: Address | null | undefined): Bui
   return builder.storeBit(1).storeRef(beginCell().storeAddress(addr).endCell());
 }
 
-/** Builds the init-data Cell exactly matching Escrow.tact init() ordering. */
+/** Builds the init-data Cell matching the legacy (never-deployed) init ordering. */
 export function buildEscrowData(config: Omit<EscrowConfig, 'code'>): Cell {
   const b = beginCell()
     .storeUint(config.dealId, 64)

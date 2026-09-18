@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 permissions:
   contents: read
@@ -68,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [backend, signer, ubot, utradebot, webapp]
+        package: [backend, signer, ubot, utradebot, webapp, checker]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -94,7 +94,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [backend, signer, ubot, utradebot, webapp]
+        package: [backend, signer, ubot, utradebot, webapp, checker]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -114,13 +114,39 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: npm run build
 
+  test:
+    name: Test ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [backend, signer, ubot, utradebot, checker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci
+
+      - name: Test
+        working-directory: ${{ matrix.package }}
+        run: npm test
+
   audit:
     name: Dependency audit — ${{ matrix.package }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package: [backend, signer, ubot, utradebot, webapp]
+        package: [backend, signer, ubot, utradebot, webapp, checker]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -130,6 +156,6 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - name: Audit production dependencies (high+)
+      - name: Audit production dependencies (moderate+)
         working-directory: ${{ matrix.package }}
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev --audit-level=moderate

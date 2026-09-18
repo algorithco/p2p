@@ -10,12 +10,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 
 A peer-to-peer escrow service for Telegram: a grammY bot plus a Telegram Mini
-App that lets two parties trade TON or USDT (jettons) safely. Funds are held by
-an on-chain `Escrow` contract (Tact) when deployed, while the backend keeps a
-full off-chain deal ledger so the product is fully usable before any wallet or
-contract exists.
+App that lets two parties trade TON or USDT (jettons) safely. Funds are held
+in a custodial W5 signer wallet (off-chain ledger in Postgres tracks every
+deal) — there is no on-chain per-deal smart contract; trust rests in the
+custodial backend wallet + guarded DB transitions, not in Tact code.
 
-## Architecture — micro-architecture (6 services + Postgres)
+## Architecture — micro-architecture (7 services + Postgres)
 
 ```
  Telegram users (chat + Mini App:8080)          Bot API
@@ -27,15 +27,16 @@ contract exists.
 │  :8080 -> :80    │ /api │  /api/*, /docs, /api/info│
 │  proxies /api    │      └──────────────────────────┘
 └──────────────────┘                 │
-                     ┌───────────────┼──────────────────┐
-                     ▼               ▼                  ▼
-               ┌──────────┐    ┌──────────────┐   ┌──────────────────┐
-               │ Postgres │    │ signer (W5)  │   │ Escrow.tact      │
-               │  :5432   │    │ V5R1 wallet  │◄─►│ (on TON: deposit,│
-               │ (deals,  │    │ microservice │   │  release/refund) │
-               │ msgs,    │    │ :3001        │   └──────────────────┘
-               │ trades)  │    └──────────────┘
-               └──────────┘          │
+                      ┌───────────────┼──────────────────┐
+                      ▼               ▼                  ▼
+                ┌──────────┐    ┌──────────────┐   ┌──────────────────┐
+                │ Postgres │    │ signer (W5)  │   │ Custodial W5     │
+                │  :5432   │    │ V5R1 wallet  │◄─►│ wallet: deposits,│
+                │ (deals,  │    │ microservice │   │ release/refund   │
+                │ msgs,    │    │ :3001        │   │ (off-chain ledger│
+                │ trades)  │    └──────────────┘   │  is source of    │
+                └──────────┘          │             │  truth)          │
+                                      │             └──────────────────┘
                      ┌───────────────┼──────────────────┐
                      ▼               ▼                  ▼
                ┌──────────┐    ┌──────────────┐   ┌──────────────────┐
@@ -52,15 +53,21 @@ contract exists.
 - **signer/** — isolated W5 (V5R1) Wallet (`SIGNER_MNEMONIC` 24 words in `signer/.env`), internal `http://signer:3001`, `x-api-key`.
 - **ubot/** — Telegram userbot (`teleproto@1.229.0`, QR login) for channel/group takeover (`channels.editCreator`, `channels.editAdmin`, `messages.migrateChat`), `API_ID`/`API_HASH`/`TWO_FA_PASSWORD` in `ubot/.env`, `:3002`.
 - **utradebot/** — account sale escrow (`teleproto`), holds `StringSession`/`phone+code` trades, revokes seller, buyer code handoff, `auth.LogOut`, `:3003`.
-- **contracts/** — `Escrow.tact`, wrappers, sandbox tests.
+- **Trust model** — custodial off-chain: Postgres is the deal ledger, the
+  isolated `signer` W5 wallet moves funds. There is no `contracts/` Tact
+  contract in this repo and no on-chain escrow enforcement.
 
 ## Quickstart
 
 ### A. Local (npm) — micro-architecture dev (frontend separate)
 
-1. Run a local PostgreSQL and create the database:
+1. Run a local PostgreSQL and create the database (generate a strong
+   password per deployment — never reuse the placeholder below):
+   ```bash
+   # openssl rand -base64 32   # use output as the password
+   ```
    ```sql
-   CREATE USER escrow WITH PASSWORD 'escrow_password';
+   CREATE USER escrow WITH PASSWORD 'CHANGE_ME_STRONG_RANDOM';
    CREATE DATABASE escrow OWNER escrow;
    ```
 2. Configure and run backend (API-only, `:3000`):
@@ -91,11 +98,13 @@ cp ubot/.env.example ubot/.env             # API_ID, API_HASH, TWO_FA_PASSWORD, 
 cp utradebot/.env.example utradebot/.env   # UTRADE_BOT_TOKEN, API_ID, API_HASH, ENCRYPTION_KEY
 
 # 2) REQUIRED: set host POSTGRES_PASSWORD (compose fails fast without it — no weak default)
-#    echo "POSTGRES_PASSWORD=strong_random_password" > .env
+#    Generate per deployment, never commit (root .env is git-ignored):
+#      openssl rand -base64 32
+#    echo "POSTGRES_PASSWORD=<output>" > .env
 
-# 3) Build & run (6 services, detached, healthchecks, resource limits)
+# 3) Build & run (7 services, detached, healthchecks, resource limits)
 docker compose up --build -d
-docker compose ps          # all 6 healthy: postgres, signer, backend, frontend, ubot, utradebot
+docker compose ps          # all 7 healthy: postgres, signer, backend, frontend, ubot, utradebot, checker
 docker compose logs -f backend   # or signer / frontend / ubot / utradebot
 
 # Frontend (Mini App) — separate microservice, Nginx proxies /api → backend
@@ -115,8 +124,8 @@ curl http://localhost:3000/docs          # HTML docs (also via http://localhost:
 
 What the compose provides:
 
-- **Services (6):** `postgres:5432`, `signer:3001` (W5), `backend:3000` **API-only** (`SERVE_STATIC=false`), **`frontend:80 → host 8080` (nginx, serves Mini App, proxies `/api` → `backend:3000`)**, `ubot:3002`, `utradebot:3003` on `escrow-net`.
-- **Micro-architecture:** each service independently buildable/scalable, isolated code/Dockerfile, separate ports (frontend `8080`, backend `3000`, signer `3001` internal, ubot `3002`, utradebot `3003`), healthchecks, `depends_on: service_healthy` (frontend waits for backend, backend for postgres+signer).
+- **Services (7):** `postgres:5432`, `signer:3001` (W5), `backend:3000` **API-only** (`SERVE_STATIC=false`), **`frontend:80 → host 8080` (nginx, serves Mini App, proxies `/api` → `backend:3000`)**, `ubot:3002`, `utradebot:3003`, `checker:3004` (standalone read-only NFT ownership verifier, not in any deal flow) on `escrow-net`.
+- **Micro-architecture:** each service independently buildable/scalable, isolated code/Dockerfile, separate ports (frontend `8080`, backend `3000`, signer `3001` internal, ubot `3002`, utradebot `3003`, checker `3004` internal), healthchecks, `depends_on: service_healthy` (frontend waits for backend, backend for postgres+signer).
 - **Security:** each runs as non-root, `.env` never baked (`env_file` at runtime), `ENCRYPTION_KEY` + `x-api-key` between services, logs redacted, `CORS` allows `FRONTEND_URL`/`WEBAPP_URL`/`localhost:8080`.
 - **Persistence:** volumes `pgdata`, `ubot_sessions`, `utrade_sessions` (600 perms).
 - **Ops:** `restart: unless-stopped`, `deploy.resources.limits`, `logging: json-file` (`10m`/`3`), `HEALTHCHECK` per Dockerfile.
@@ -142,17 +151,16 @@ Minimum for off-chain: `BOT_TOKEN`, `ADMIN_TELEGRAM_IDS`, `DATABASE_URL` (backen
 
 ## Status & roadmap
 
-| Status | Item                                                                                     |
-| ------ | ---------------------------------------------------------------------------------------- |
-| ✅     | Bot commands and admin flows                                                             |
-| ✅     | Deal lifecycle tracked off-chain (create → deposit → confirm → release/refund)           |
-| ✅     | Telegram Mini App UI                                                                     |
-| ✅     | One-time join links + per-deal chat                                                      |
-| ✅     | W5 signer microservice (`signer/`) — isolated `SIGNER_MNEMONIC` (24 words)               |
-| ⚠️     | Compile the Tact contract and deploy it (see [contracts/README.md](contracts/README.md)) |
-| ⚠️     | Set `REQUIRE_ONCHAIN=true` once deployed to enforce on-chain mode                        |
-| ⚠️     | Fund the W5 deployer wallet (`SIGNER_MNEMONIC` in `signer/.env`, V5R1) with TON for gas  |
-| ❌     | Jetton master verification pending (`USDT_JETTON_ADDRESS` not yet validated on-chain)    |
+| Status | Item                                                                                                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ✅     | Bot commands and admin flows                                                                                                                      |
+| ✅     | Deal lifecycle tracked off-chain (create → deposit → confirm → release/refund)                                                                    |
+| ✅     | Telegram Mini App UI                                                                                                                              |
+| ✅     | One-time join links + per-deal chat                                                                                                               |
+| ✅     | W5 signer microservice (`signer/`) — isolated `SIGNER_MNEMONIC` (24 words)                                                                        |
+| ℹ️     | Custodial model: no on-chain Tact contract — funds sit in the signer W5 wallet; Postgres + idempotent PENDING transitions are the source of truth |
+| ⚠️     | Fund the W5 signer wallet (`SIGNER_MNEMONIC` in `signer/.env`, V5R1) with TON for gas                                                             |
+| ❌     | Jetton master verification pending (`USDT_JETTON_ADDRESS` not yet validated on-chain)                                                             |
 
 ## Contributing — branching, commits, releases
 

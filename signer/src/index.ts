@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import { config, validateMnemonic } from './config';
 import { signer } from './wallet';
 import logger, { sanitizeLogValue } from './logger';
+import { idemStore as idemCacheStore, paramsHashOf, checkPersistent, storePersistent } from './idempotency';
+import { pool as dbPool, ensureIdempotencyTable } from './db';
 
 const app = express();
 
@@ -45,16 +47,8 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 }
 
 // ── Idempotency dedupe (last line of defense before an on-chain transfer) ──
-// The DURABLE double-payout guarantee lives in the backend DB (PENDING states +
-// deterministic payout_idempotency_key committed before any send). This cache only
-// covers the crash window where the backend sent twice with the SAME key because it
-// never got our first response (timeout/crash). Memory-only: lost on signer restart,
-// bounded size + TTL so it cannot grow unboundedly. A repeat with the same key but
-// DIFFERENT transfer params is rejected (409) — that signals a key-collision bug.
-const IDEM_MAX_ENTRIES = 1000;
-const IDEM_TTL_MS = 24 * 3600 * 1000;
-const idemCache = new Map<string, { seqno: number; paramsHash: string; at: number }>();
-
+// Durable: memory LRU + Postgres `signer_idempotency` when DATABASE_URL is set
+// (see ./idempotency + ./db). A restart no longer wipes dedupe tracking.
 function idemKeyFrom(req: Request): string | null {
   const h = (req.headers['x-idempotency-key'] as string) || '';
   const b = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : '';
@@ -62,31 +56,12 @@ function idemKeyFrom(req: Request): string | null {
   return k ? k.slice(0, 128) : null;
 }
 
-function paramsHashOf(obj: unknown): string {
-  return crypto
-    .createHash('sha256')
-    .update(JSON.stringify(obj ?? null))
-    .digest('hex');
+async function idemCheck(key: string, paramsHash: string): Promise<{ seqno: number } | { conflict: true } | null> {
+  return checkPersistent(idemCacheStore, dbPool, key, paramsHash);
 }
 
-/** Returns {seqno} on replay hit, {conflict:true} on key-reuse-with-new-params, null on miss. */
-function idemCheck(key: string, paramsHash: string): { seqno: number } | { conflict: true } | null {
-  const e = idemCache.get(key);
-  if (!e) return null;
-  if (Date.now() - e.at > IDEM_TTL_MS) {
-    idemCache.delete(key);
-    return null;
-  }
-  if (e.paramsHash !== paramsHash) return { conflict: true };
-  return { seqno: e.seqno };
-}
-
-function idemStore(key: string, seqno: number, paramsHash: string): void {
-  if (idemCache.size >= IDEM_MAX_ENTRIES) {
-    const oldest = idemCache.keys().next();
-    if (!oldest.done) idemCache.delete(oldest.value);
-  }
-  idemCache.set(key, { seqno, paramsHash, at: Date.now() });
+async function idemStore(key: string, seqno: number, paramsHash: string): Promise<void> {
+  await storePersistent(idemCacheStore, dbPool, key, seqno, paramsHash);
 }
 
 // Public health (no auth) — docker healthcheck
@@ -151,7 +126,7 @@ app.post('/send', authMiddleware, async (req, res) => {
     const idemKey = idemKeyFrom(req);
     const phash = paramsHashOf({ to, value: String(value), bounce, comment });
     if (idemKey) {
-      const hit = idemCheck(idemKey, phash);
+      const hit = await idemCheck(idemKey, phash);
       if (hit && 'conflict' in hit)
         return res.status(409).json({ error: 'idempotency_conflict: key already used with different transfer params' });
       if (hit) {
@@ -162,7 +137,7 @@ app.post('/send', authMiddleware, async (req, res) => {
       }
     }
     const result = await signer.send({ to, value: String(value), body: body || null, bounce, comment });
-    if (idemKey) idemStore(idemKey, result.seqno, phash);
+    if (idemKey) await idemStore(idemKey, result.seqno, phash);
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = (err as Error).message;
@@ -207,7 +182,7 @@ app.post('/send-jetton', authMiddleware, async (req, res) => {
     const idemKey = idemKeyFrom(req);
     const phash = paramsHashOf({ jettonMasterAddress, to, amount: String(amount), forwardComment, forwardTonAmount });
     if (idemKey) {
-      const hit = idemCheck(idemKey, phash);
+      const hit = await idemCheck(idemKey, phash);
       if (hit && 'conflict' in hit)
         return res.status(409).json({ error: 'idempotency_conflict: key already used with different transfer params' });
       if (hit) {
@@ -224,7 +199,7 @@ app.post('/send-jetton', authMiddleware, async (req, res) => {
       forwardComment,
       forwardTonAmount,
     });
-    if (idemKey) idemStore(idemKey, result.seqno, phash);
+    if (idemKey) await idemStore(idemKey, result.seqno, phash);
     res.json({ ok: true, ...result });
   } catch (err) {
     const msg = (err as Error).message;
@@ -264,6 +239,12 @@ async function start() {
   const v = validateMnemonic(config.mnemonic);
   if (!v.valid) {
     logger.warn(v.reason);
+  }
+  try {
+    await ensureIdempotencyTable();
+    if (dbPool) logger.info('Signer idempotency persistence enabled (Postgres signer_idempotency)');
+  } catch (e) {
+    logger.warn('Signer idempotency table ensure failed — memory-only fallback', e);
   }
   try {
     await signer.init();
