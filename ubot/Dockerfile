@@ -19,7 +19,7 @@ RUN npm ci --omit=dev
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY --from=build /app/ubot/dist ./dist
 # Do NOT copy .env — injected via env_file
-RUN mkdir -p /app/ubot/sessions logs && chown -R ubot:ubot /app/ubot/sessions logs && chmod 700 /app/ubot/sessions
+RUN mkdir -p /app/ubot/sessions /app/ubot/logs && chown -R ubot:ubot /app/ubot/sessions /app/ubot/logs && chmod 700 /app/ubot/sessions
 EXPOSE 3002
 USER ubot
 HEALTHCHECK --interval=20s --timeout=3s --retries=5 --start-period=40s \

@@ -9,6 +9,9 @@ coverage/
 .vite/
 *.tsbuildinfo
 sessions/
+*.pem
+*.key
+*.p12
 .DS_Store
 Thumbs.db
 .idea/

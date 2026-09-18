@@ -6,7 +6,7 @@
  */
 import { Address } from '@ton/core';
 import { config } from '../config';
-import logger from '../logger';
+import logger, { sanitizeLogValue } from '../logger';
 import { client, dnsResolve, encodeSubdomain, getNftData, getRootDnsAddress, sameAddress, toRaw } from '../ton';
 
 export interface UsernameResolution {
@@ -66,7 +66,7 @@ export async function resolveUsername(rawName: string): Promise<UsernameResoluti
   try {
     resolver = await discoverTmeResolver();
   } catch (err) {
-    logger.warn(`username @${username}: resolver discovery failed`, err);
+    logger.warn(`username @${sanitizeLogValue(username)}: resolver discovery failed`, err);
     return {
       username,
       tokenized: false,
@@ -85,7 +85,7 @@ export async function resolveUsername(rawName: string): Promise<UsernameResoluti
   try {
     itemAddress = await resolveItemOnchain(username, resolver);
   } catch (err) {
-    logger.warn(`username @${username}: on-chain resolve failed`, err);
+    logger.warn(`username @${sanitizeLogValue(username)}: on-chain resolve failed`, err);
   }
 
   if (!itemAddress) {
@@ -122,7 +122,7 @@ export async function resolveUsername(rawName: string): Promise<UsernameResoluti
       };
     }
   } catch (err) {
-    logger.warn(`username @${username}: contract state unreadable`, err);
+    logger.warn(`username @${sanitizeLogValue(username)}: contract state unreadable`, err);
     return {
       username,
       tokenized: false,
