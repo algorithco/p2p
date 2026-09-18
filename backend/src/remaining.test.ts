@@ -1,4 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
+
+// Repo root resolved portably (works on Linux CI and Windows dev machines).
+// This file lives at <repo>/backend/src/remaining.test.ts, so root is ../..
+// NOTE: __dirname is used (not import.meta) because backend tsconfig uses CommonJS.
+const repoRoot = path.resolve(__dirname, '..', '..');
+const repoFile = (...segments: string[]) => path.join(repoRoot, ...segments);
 
 // P2-7: dispute writer sets flag
 describe('P2-7 dispute writer', () => {
@@ -21,7 +28,7 @@ describe('P2-10 deadline enforcement', () => {
 describe('P3-11 phone retain warning', () => {
   it('sellFlow contains prominent warning', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/utradebot/src/bot/handlers/sellFlow.ts', 'utf8');
+    const txt = fs.readFileSync(repoFile('utradebot', 'src', 'bot', 'handlers', 'sellFlow.ts'), 'utf8');
     expect(txt).toContain('OGOHLANTIRISH');
     expect(txt).toContain('telefon raqami');
   });
@@ -39,7 +46,7 @@ describe('P3-12 channel stall', () => {
 describe('P3-13 utrade code guard', () => {
   it('HTTP code endpoint never sets COMPLETED (code inspection)', async () => {
     const fs = await import('node:fs');
-    const idx = fs.readFileSync('D:/repos/p2p bot/escrow-bot/backend/src/index.ts', 'utf8');
+    const idx = fs.readFileSync(repoFile('backend', 'src', 'index.ts'), 'utf8');
     expect(idx).toContain('Code received but NOT verified');
     expect(idx).toContain('Trade NOT marked COMPLETED');
     // Ensure the utrade code handler sets AWAITING_CODE not COMPLETED
@@ -55,13 +62,13 @@ describe('P3-13 utrade code guard', () => {
 describe('P4-14 chat encryption', () => {
   it('/key endpoint note says not E2E against operator', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/backend/src/index.ts', 'utf8');
+    const txt = fs.readFileSync(repoFile('backend', 'src', 'index.ts'), 'utf8');
     expect(txt).toContain('not E2E against operator');
     expect(txt).toContain('encrypted at rest');
   });
   it('GET /key checks adminApiKeyMatches not generic api-key', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/backend/src/index.ts', 'utf8');
+    const txt = fs.readFileSync(repoFile('backend', 'src', 'index.ts'), 'utf8');
     const keyBlockStart = txt.indexOf("app.get(\n  '/api/deals/:id/key'");
     const block = txt.slice(keyBlockStart, keyBlockStart + 3000);
     expect(block).toContain('adminApiKeyMatches');
@@ -73,7 +80,7 @@ describe('P4-14 chat encryption', () => {
 describe('P5-15 underpay auto-refund capture', () => {
   it('listener stores underpay src for auto-refund', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/backend/src/blockchain/listener.ts', 'utf8');
+    const txt = fs.readFileSync(repoFile('backend', 'src', 'blockchain', 'listener.ts'), 'utf8');
     expect(txt).toContain('underpay');
     expect(txt).toContain('auto-refund');
   });
@@ -83,7 +90,7 @@ describe('P5-15 underpay auto-refund capture', () => {
 describe('P5-16 rate limit note', () => {
   it('guard rateLimit contains horizontal scaling note', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/backend/src/auth/guard.ts', 'utf8');
+    const txt = fs.readFileSync(repoFile('backend', 'src', 'auth', 'guard.ts'), 'utf8');
     expect(txt).toContain('per-process');
     expect(txt).toContain('Redis');
   });
@@ -93,13 +100,13 @@ describe('P5-16 rate limit note', () => {
 describe('P5-18 checker wiring', () => {
   it('docker-compose includes checker service', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/docker-compose.yml', 'utf8');
+    const txt = fs.readFileSync(repoFile('docker-compose.yml'), 'utf8');
     expect(txt).toContain('checker:');
     expect(txt).toContain('3004');
   });
   it('CI includes checker', async () => {
     const fs = await import('node:fs');
-    const txt = fs.readFileSync('D:/repos/p2p bot/escrow-bot/.github/workflows/ci.yml', 'utf8');
+    const txt = fs.readFileSync(repoFile('.github', 'workflows', 'ci.yml'), 'utf8');
     expect(txt).toContain('checker');
   });
 });
