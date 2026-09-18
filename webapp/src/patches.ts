@@ -474,6 +474,13 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
   ) as HTMLElement;
   const anchor = actionsTitle || (view.querySelector('.deal-head') as HTMLElement);
   if (!anchor) return;
+  // Dedupe: patchViewDeal's observer can invoke injectWebappBar twice concurrently
+  // (both if-branches match, or a re-render lands mid-fetch). Each call renders at
+  // most ONE bar, so a bar present at insert time means the sibling call already
+  // won — without this the same banner renders twice (seen live on DEPOSIT_CONFIRMED).
+  // isConnected also drops late responses after navigating to another deal.
+  if (!view.isConnected) return;
+  if (view.querySelector('.webapp-bar')) return;
   const st = String(deal.status || '').toUpperCase();
   const dealType = String((deal as any).deal_type || (deal as any).dealType || 'P2P').toUpperCase();
   const isChannelDeal = dealType === 'CHANNEL' || dealType === 'GROUP';
