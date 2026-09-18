@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [backend, signer, ubot, utradebot, webapp]
+        package: [backend, signer, ubot, utradebot, webapp, checker]
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -8,7 +8,7 @@
  * here — both were probed and return empty/403.)
  */
 import { config } from '../config';
-import logger from '../logger';
+import logger, { sanitizeLogValue } from '../logger';
 import { fetchNftMetadataName, getNftData, getNftsByOwner, toRaw } from '../ton';
 
 export interface GiftResolution {
@@ -42,11 +42,10 @@ function normalize(s: string): string {
 /**
  * Strip CR/LF (and truncate) before interpolating user-controlled values
  * into log lines — prevents log-injection (forged multi-line entries).
+ * Canonical helper lives in ../logger (CodeQL-recognized barrier shape).
  */
 function sanitizeLogToken(value: unknown, maxLen = 120): string {
-  return String(value ?? '')
-    .replace(/[\r\n]+/g, ' ')
-    .slice(0, maxLen);
+  return sanitizeLogValue(value, maxLen);
 }
 
 /** TonAPI item metadata name, with fallback to the item content cell. */

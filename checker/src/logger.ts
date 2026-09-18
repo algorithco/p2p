@@ -42,6 +42,35 @@ function redact(value: unknown, seen: Set<object> = new Set()): unknown {
   return value;
 }
 
+/**
+ * Sanitize user-controlled values before embedding in log messages.
+ * Escapes control characters (newlines, CR) so attackers cannot
+ * forge/spoof log lines (CWE-117), and truncates overly long values.
+ */
+export function sanitizeLogValue(v: unknown, max = 200): string {
+  let s: string;
+  if (typeof v === 'string') s = v;
+  else if (v === null || v === undefined) s = '';
+  else {
+    try {
+      s = JSON.stringify(v);
+    } catch {
+      s = String(v);
+    }
+  }
+  // Strip newlines up front: CR/LF are the log-forging vector. The first
+  // `.replace(/\n/g, '')` step is exactly the shape CodeQL js/log-injection
+  // models as a barrier (StringReplaceSanitizer), so this helper keeps both
+  // runtime logs and static analysis clean.
+  const singleLine = s.replace(/\n/g, '').replace(/\r/g, '');
+  // Control-char class is intentional here: this IS the log-injection sanitizer.
+  // eslint-disable-next-line no-control-regex
+  const escaped = singleLine.replace(/[\x00-\x1F\x7F]/g, (c) => {
+    return `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`;
+  });
+  return escaped.length > max ? escaped.slice(0, max) + '…' : escaped;
+}
+
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(
