@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.0.0](https://github.com/algorithco/p2p/compare/v1.1.1...v2.0.0) (2026-09-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **security:** backend, ubot, and utradebot now refuse to boot without a valid 64-or-128-hex ENCRYPTION_KEY in ALL environments (dev/staging/prod), not just production. Set keys before starting: openssl rand -hex 32. Backend and utradebot MUST share one value (backend writes utrade_trades.session_encrypted, utradebot decrypts it); ubot's key is independent. Both services log a non-secret sha256-16 fingerprint at boot so operators can verify the match from logs. Isolation note: this commit is deliberately self-contained — revert ONLY this commit to restore warn-only behavior. Also carries listener.p0.test.ts (needs the transition-commit exports) and the .env sharing-rule docs.
+
+### Features
+
+* sender-verification and unguessable deposit tokens (P0-1) ([7cf0ba6](https://github.com/algorithco/p2p/commit/7cf0ba6b63407ad2054cc4f0e1c4329549ec0d19))
+* wire checker service into compose and CI (P5-18) ([9204dba](https://github.com/algorithco/p2p/commit/9204dba70ca29fba4b876b6b253dd2825dee1d41))
+
+
+### Bug Fixes
+
+* **ci:** green checks - portable test paths, sync locks, gitleaks false positives ([a0bd4f1](https://github.com/algorithco/p2p/commit/a0bd4f1b3a824df2e81a6bf06191c2bd1dd029dd))
+* consolidate deal state transition tables (P1-3, P2-8) ([89ba3e3](https://github.com/algorithco/p2p/commit/89ba3e3f1bd4a2732620279f8daffd34db371461))
+* fee-leg retry mechanism and stuck-payout escalation (P1-5, P1-6) ([cee1602](https://github.com/algorithco/p2p/commit/cee16021adfe9df06546323576b90705dc6adfdb))
+* implement in-band dispute writer (P2-7) ([4d22d7d](https://github.com/algorithco/p2p/commit/4d22d7dc36250509a4ed231674677c745d964d60))
+* null legacy buyer_id/seller_id writes + migration tracking (P2-9) ([5264e8f](https://github.com/algorithco/p2p/commit/5264e8f7e05b82a1371f52d21479426f7baebb66))
+* on-chain missed-deposit check before auto-close (P1-4) ([101b0fa](https://github.com/algorithco/p2p/commit/101b0fa5848e2b389f43861bbf662082805fb5ea))
+* respect deal deadline in auto-expiry scheduler (P2-10) ([b9fcfd6](https://github.com/algorithco/p2p/commit/b9fcfd6f9f5e01197efb79d4e4f6cd69b029d24d))
+* **security:** distinct admin header, no x-api-key fallback (P0-2) ([7b40d16](https://github.com/algorithco/p2p/commit/7b40d16af6597618563d5b9a1ba79c9cf1e2d157))
+* **security:** durable signer idempotency across restarts (P3) ([ae36e4e](https://github.com/algorithco/p2p/commit/ae36e4ec4c7068f59eda899ecc3c9f6de967a5e7))
+* **security:** enforce ENCRYPTION_KEY validation in all environments ([facacd2](https://github.com/algorithco/p2p/commit/facacd2ba11663c814638d263731d047fe01776a))
+* **security:** log payout alert failures; type payout paths (P3) ([e2dd76e](https://github.com/algorithco/p2p/commit/e2dd76e777ffce1c2ef78320ad4f505dad66f418))
+* **security:** resolve CodeQL alerts blocking PR ([b8e342e](https://github.com/algorithco/p2p/commit/b8e342eb676582f13c9c544d20372452055414bc))
+* **security:** strong secrets baseline, no weak defaults ([03ad0bc](https://github.com/algorithco/p2p/commit/03ad0bcd9f55eae594e7cb06bef386896ecb0bc6))
+* **security:** throw on session decrypt mismatch (utrade key boundary) ([1b10555](https://github.com/algorithco/p2p/commit/1b10555afbc76ddf1cbd06b0510ff9c17ad41997))
+* wire underpay auto-refund into expiry scheduler (P5-15) ([6da2b77](https://github.com/algorithco/p2p/commit/6da2b7719051e1e04e37c2f8f1a87e60de5a6740))
+
 ## [1.1.1](https://github.com/algorithco/p2p/compare/v1.1.0...v1.1.1) (2026-09-11)
 
 
