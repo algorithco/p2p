@@ -1991,6 +1991,52 @@ button:hover .ico-ext {
 .ico-pulse {
   animation: ico-pulse 1.8s ease-in-out infinite;
 }
+/* send-button paper plane: flies on tap (animate-ui send) */
+.send-btn .ico {
+  width: 21px;
+  height: 21px;
+}
+.send-btn:active .ico-fly {
+  animation: ico-fly 0.45s ease;
+}
+@keyframes ico-fly {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+  40% {
+    transform: translate(8px, -8px) scale(0.85);
+    opacity: 0.55;
+  }
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 1;
+  }
+}
+/* Join requests rendered as incoming message bubbles inside the chat flow
+   (not a separate top card): avatar + name + ✅/❌ message-like buttons. */
+.bubble.join-bubble {
+  max-width: 88%;
+}
+.join-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.join-bubble .avatar {
+  margin-bottom: 0;
+}
+.join-msg-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.join-msg-actions .btn {
+  flex: 1;
+  padding: 9px;
+  font-size: 13px;
+}
 
 /* ---------------- Home polish (scoped to #/home only) ----------------
    Greeting, stats, filter tabs and search above the deal list.
@@ -2690,7 +2736,11 @@ button:hover .ico-ext {
   }
   .ico-pop,
   .ico-ring,
-  .ico-pulse {
+  .ico-pulse,
+  .ico-fly {
     animation: none;
+  }
+  .ico-chev {
+    transition: none;
   }
 }

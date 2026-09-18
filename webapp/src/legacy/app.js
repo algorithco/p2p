@@ -408,6 +408,9 @@
     var pollMs = opts.pollMs || 8000;
     var onChange = typeof opts.onChange === 'function' ? opts.onChange : function () {};
     var notifyNew = opts.notifyNew !== false;
+    // asMessages: render each request as an incoming message bubble (for the
+    // chat flow) instead of a standalone card (deal page top). Same buttons.
+    var asMessages = !!opts.asMessages;
     var box = UI.h('div', { class: 'join-req-box' });
     var prevCount = null;
     var stopped = false;
@@ -553,6 +556,21 @@
         },
         [UI.icon('trash-2', 'ico-shake'), ' Rad etish'],
       );
+      if (asMessages) {
+        return UI.h('div', { class: 'msg' }, [
+          UI.h('div', { class: 'bubble join-bubble' }, [
+            UI.h('div', { class: 'join-head' }, [
+              avatarFor(r, name),
+              UI.h('div', { style: 'min-width:0;flex:1' }, [
+                UI.h('b', { text: name, style: 'font-size:13.5px' }),
+                UI.h('div', { class: 'small muted', text: uname + (when ? ' · ' + when : '') }),
+              ]),
+            ]),
+            UI.h('div', { style: 'font-size:13.5px;margin:2px 0 4px', text: "Bitimga qo'shilmoqchi 🤝" }),
+            UI.h('div', { class: 'join-msg-actions' }, [approveBtn, rejectBtn]),
+          ]),
+        ]);
+      }
       var card = UI.h('div', { class: 'studio-card inbox-card', style: compact ? 'margin-bottom:8px' : '' }, [
         UI.h('div', { class: 'studio-head' }, [
           avatarFor(r, name),
@@ -580,13 +598,17 @@
         UI.toast("Yangi qo'shilish so'rovi keldi", 'ok');
       }
       prevCount = list.length;
-      box.appendChild(
-        UI.h('div', {
-          class: 'small muted',
-          style: 'margin:0 2px 8px;font-weight:700',
-          text: "Kutilayotgan so'rovlar (" + list.length + ') — shu yerda tasdiqlang',
-        }),
-      );
+      // Card mode keeps its section header; message mode is self-explanatory
+      // (each bubble carries who + ✅/❌), so no header inside the chat flow.
+      if (!asMessages) {
+        box.appendChild(
+          UI.h('div', {
+            class: 'small muted',
+            style: 'margin:0 2px 8px;font-weight:700',
+            text: "Kutilayotgan so'rovlar (" + list.length + ') — shu yerda tasdiqlang',
+          }),
+        );
+      }
       list.forEach(function (r) {
         box.appendChild(reqCard(r));
       });
@@ -2480,26 +2502,30 @@
         }
       },
     });
-    var sendBtn = UI.h('button', {
-      class: 'send-btn',
-      'aria-label': 'Yuborish',
-      html: '<svg viewBox="0 0 24 24" width="21" height="21"><path fill="currentColor" d="M3.4 20.4 20.9 12 3.4 3.6 3.3 10l13 2-13 2z"/></svg>',
-      onclick: send,
-    });
+    var sendBtn = UI.h(
+      'button',
+      {
+        class: 'send-btn',
+        'aria-label': 'Yuborish',
+        onclick: send,
+      },
+      [UI.icon('send', 'ico-fly')],
+    );
+    // Error-only banner: the permanent "encrypted" top notice was removed —
+    // error states (no key / not a party) still surface here + via toast.
     var statusBar = UI.h('div', {
       class: 'small muted',
-      style: 'text-align:center;padding:6px;font-size:12px',
-      text: '🔒 Shifrlangan kanal — yuklanmoqda…',
+      style: 'display:none;text-align:center;padding:6px;font-size:12px',
     });
 
-    var joinReqBar = UI.h('div', { style: 'padding:0 2px 6px' });
+    // Join requests live INSIDE the message flow (joinMsgBox node appended
+    // after messages on every poll), not in a separate top bar.
     document.getElementById('view').innerHTML = '';
     document
       .getElementById('view')
       .appendChild(
         UI.h('div', { class: 'chat-wrap' }, [
           statusBar,
-          joinReqBar,
           scroller,
           UI.h('div', { class: 'composer' }, [input, sendBtn]),
         ]),
@@ -2609,33 +2635,50 @@
       if (nearBottom || list.length > prevCount) scroller.scrollTop = scroller.scrollHeight;
     }
 
-    function setStatus(icn, icls, text, color) {
-      statusBar.innerHTML = '';
-      if (icn) statusBar.appendChild(UI.icon(icn, icls || ''));
-      statusBar.appendChild(document.createTextNode((icn ? ' ' : '') + text));
-      statusBar.style.color = color || '';
-    }
+    var keyErrorToasted = false;
     function updateStatus() {
+      var locked = !!keyError || !keyReady;
       if (keyError) {
-        setStatus('cross', '', keyError, '#ff6b6b');
-        input.setAttribute('disabled', '');
-        sendBtn.setAttribute('disabled', '');
-      } else if (!keyReady) {
-        setStatus('lock-keyhole', '', "Shifrlangan kanal o'rnatilmoqda…", '');
+        // Error-only banner (the permanent top notice is gone by design).
+        statusBar.innerHTML = '';
+        statusBar.style.display = '';
+        statusBar.appendChild(UI.icon('cross', ''));
+        statusBar.appendChild(document.createTextNode(' ' + keyError));
+        statusBar.style.color = '#ff6b6b';
+        if (!keyErrorToasted) {
+          keyErrorToasted = true;
+          try {
+            UI.toast(keyError, 'err');
+          } catch (e) {}
+        }
+      } else {
+        statusBar.style.display = 'none';
+      }
+      if (locked) {
         input.setAttribute('disabled', '');
         sendBtn.setAttribute('disabled', '');
       } else {
-        setStatus('lock-keyhole', '', "Uchdan-uchga shifrlangan · faqat siz va sherigingiz o'qiy oladi", '#7dd3a5');
         input.removeAttribute('disabled');
         sendBtn.removeAttribute('disabled');
       }
     }
 
+    var loadErrorToasted = false;
     async function load() {
       try {
         var raw = await Api.chat(id);
         var decrypted = await decryptList(raw);
         renderMessages(decrypted);
+        loadErrorToasted = false;
+        // Join requests ride the message flow: re-append the live box AFTER
+        // messages (renderMessages wipes the scroller). Empty box = invisible.
+        if (joinMsgBox) {
+          try {
+            var nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 140;
+            scroller.appendChild(joinMsgBox);
+            if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+          } catch (e) {}
+        }
         consecutiveFails = 0;
       } catch (err) {
         consecutiveFails++;
@@ -2659,7 +2702,12 @@
               }),
             ]),
           );
-          statusBar.textContent = '⛔ Bu bitim tomoni emassiz';
+          if (!loadErrorToasted) {
+            loadErrorToasted = true;
+            try {
+              UI.toast('Bu bitim tomoni emassiz', 'err');
+            } catch (e) {}
+          }
         } else if (err && err.status === 401) {
           scroller.innerHTML = '';
           scroller.appendChild(
@@ -2667,7 +2715,12 @@
               UI.h('div', { class: 'small', text: "Shifrlangan chat uchun Mini App'ni Telegram ichida oching." }),
             ]),
           );
-          statusBar.textContent = '⛔ Telegram ichida oching';
+          if (!loadErrorToasted) {
+            loadErrorToasted = true;
+            try {
+              UI.toast('Telegram ichida oching', 'err');
+            } catch (e) {}
+          }
         } else {
           // Transient: keep existing messages, show toast after 2 fails
           if (consecutiveFails >= 2) UI.toast("Chat yuklanmadi — qayta urinib ko'ring", 'err');
@@ -2757,11 +2810,15 @@
     // Boot
     updateStatus();
     initKey();
-    // Inline join approvals at top of chat — creator (either side) approves here.
-    // This is the ONLY approval place in the mini app (no separate page, no bot buttons).
-    // Mounts once; re-checks after 1.5s in case Telegram injected the user late
-    // (App.state.meId can be a stale preview id on fast boot).
+    // Join approvals live INSIDE the message flow as message bubbles with
+    // ✅/❌ buttons (not a separate top bar). This is the ONLY approval place
+    // in the mini app (no separate page, no bot buttons). The live box node is
+    // re-appended after messages on every chat poll (renderMessages wipes the
+    // scroller). Mounts once; re-checks after 1.5s in case Telegram injected
+    // the user late (App.state.meId can be a stale preview id on fast boot).
     var joinBoxMounted = false;
+    // Holds the live join-requests box node; load() appends it after messages.
+    var joinMsgBox = null;
     function freshUid() {
       try {
         var ru = (TG.realUser && TG.realUser()) || null;
@@ -2779,23 +2836,16 @@
           var openSlot = !deal.buyer_telegram_id || !deal.seller_telegram_id;
           if (!isParty || !openSlot || UI.isFinalStatus(deal.status)) return;
           joinBoxMounted = true;
-          joinReqBar.appendChild(
-            joinRequestsBox(id, {
-              compact: true,
-              pollMs: 5000,
-              onChange: function () {
-                load();
-              },
-            }),
-          );
-          // Waiting hint while no request exists — so the creator knows where ✅/❌ will appear.
-          // joinRequestsBox renders nothing when empty, so this hint fills the silence.
-          var hint = UI.h('div', {
-            class: 'small muted',
-            style: 'text-align:center;padding:4px 8px 8px;font-size:12px',
-            text: "Sherik havola orqali qo'shilganda so'rov shu yerda chiqadi — shu yerda ✅ / ❌ bosing",
+          // Not appended anywhere yet: load() moves this live node after the
+          // messages on every poll (message-like placement, no top bar).
+          joinMsgBox = joinRequestsBox(id, {
+            compact: true,
+            pollMs: 5000,
+            asMessages: true,
+            onChange: function () {
+              load();
+            },
           });
-          joinReqBar.appendChild(hint);
         })
         .catch(function () {
           /* not a party / offline — chat shows its own banner */

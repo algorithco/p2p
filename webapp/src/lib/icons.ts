@@ -17,6 +17,7 @@ import {
   Key,
   PartyPopper,
   Search,
+  Send,
 } from 'lucide';
 
 /**
@@ -49,6 +50,7 @@ const ICONS: Record<string, IconNode> = {
   key: Key as unknown as IconNode,
   'party-popper': PartyPopper as unknown as IconNode,
   search: Search as unknown as IconNode,
+  send: Send as unknown as IconNode,
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
