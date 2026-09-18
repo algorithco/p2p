@@ -126,6 +126,17 @@ export async function ensureTables() {
   await ensureColumn('deals', 'payout_attempted_at TIMESTAMPTZ');
   await ensureColumn('deals', 'fee_payout_failed BOOLEAN DEFAULT false');
   await ensureColumn('deals', 'fee_payout_error TEXT');
+  await ensureColumn('deals', 'fee_retry_count INT DEFAULT 0');
+  await ensureColumn('deals', 'fee_last_retry_at TIMESTAMPTZ');
+  // P0-1 deposit token + buyer expected address for sender verification
+  await ensureColumn('deals', 'deposit_token TEXT');
+  await ensureColumn('deals', 'buyer_expected_address TEXT');
+  // unique index for deposit token (partial, only where not null)
+  try {
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_deals_deposit_token ON deals(deposit_token) WHERE deposit_token IS NOT NULL AND deposit_token <> ''`,
+    );
+  } catch {}
   await pool.query("UPDATE deals SET deal_type='P2P' WHERE deal_type IS NULL");
   await pool.query('CREATE INDEX IF NOT EXISTS idx_deals_type ON deals(deal_type)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_deals_channel_id ON deals(channel_id) WHERE channel_id IS NOT NULL');

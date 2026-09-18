@@ -54,8 +54,14 @@ CREATE TABLE IF NOT EXISTS deals (
   payout_idempotency_key TEXT,
   payout_attempted_at TIMESTAMPTZ,
   fee_payout_failed BOOLEAN DEFAULT false,
-  fee_payout_error TEXT
+  fee_payout_error TEXT,
+  fee_retry_count INT DEFAULT 0,
+  fee_last_retry_at TIMESTAMPTZ,
+  -- P0-1 deposit token: unguessable per-deal memo, replaces predictable escrow#<id>
+  deposit_token TEXT,
+  buyer_expected_address TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_deals_deposit_token ON deals(deposit_token) WHERE deposit_token IS NOT NULL AND deposit_token <> '';
 CREATE INDEX IF NOT EXISTS idx_deals_type ON deals(deal_type);
 CREATE INDEX IF NOT EXISTS idx_deals_channel_id ON deals(channel_id) WHERE channel_id IS NOT NULL;
 -- Party/status lookups (/api/deals/mine, scheduler, listener seed). Singles, not a

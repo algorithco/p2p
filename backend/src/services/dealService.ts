@@ -108,6 +108,8 @@ export async function createDealRecord(params: {
   channelTitle?: string | null;
   channelSnapshot?: Record<string, unknown> | null;
   escrowHolderId?: number | null;
+  depositToken?: string | null;
+  buyerExpectedAddress?: string | null;
 }) {
   const {
     buyerId = null,
@@ -128,6 +130,8 @@ export async function createDealRecord(params: {
     channelTitle = null,
     channelSnapshot = null,
     escrowHolderId = null,
+    depositToken: suppliedToken = null,
+    buyerExpectedAddress: suppliedBuyerAddr = null,
   } = params;
 
   const normalizedType = ['P2P', 'CHANNEL', 'GROUP'].includes(String(dealType).toUpperCase())
@@ -142,6 +146,17 @@ export async function createDealRecord(params: {
   const chatKeyPlain = generateDealChatKey();
   const chatKeyStored = encryptDealKey(chatKeyPlain);
 
+  // P0-1: unguessable deposit memo token
+  let depositToken = suppliedToken ? String(suppliedToken).trim().toLowerCase() : null;
+  if (!depositToken) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require('node:crypto') as typeof import('node:crypto');
+    depositToken = crypto.randomBytes(16).toString('hex');
+  }
+
+  const buyerExpectedAddress = suppliedBuyerAddr ? String(suppliedBuyerAddr).trim() : null;
+
+  // P2-9: stop writing legacy buyer_id/seller_id (never read) — store NULL
   const res: QueryResult = await db.query(
     `INSERT INTO deals (
         buyer_id,
@@ -166,8 +181,10 @@ export async function createDealRecord(params: {
         channel_title,
         channel_snapshot,
         channel_verified,
-        escrow_holder_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20) RETURNING *`,
+        escrow_holder_id,
+        deposit_token,
+        buyer_expected_address
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now(),now(),$15,$16,$17,$18,$19::jsonb,false,$20,$21,$22) RETURNING *`,
     [
       buyerId,
       sellerId,
@@ -189,6 +206,8 @@ export async function createDealRecord(params: {
       channelTitle,
       channelSnapshot ? JSON.stringify(channelSnapshot) : '{}',
       escrowHolderId,
+      depositToken,
+      buyerExpectedAddress,
     ],
   );
   return res.rows[0];

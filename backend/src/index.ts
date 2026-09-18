@@ -590,6 +590,30 @@ app.post(
         error: 'payment_address_not_configured: set WALLET_ADDRESS or ADMIN_ADDRESS to a valid TON address',
       });
     }
+    // P0-1 (b): capture buyer expected deposit address if knowable (TonConnect wallet, previous users.ton_address)
+    let buyerExpectedAddress: string | null = null;
+    const rawWallet =
+      String((req.body as any).buyerWalletAddress || (req.body as any).buyer_wallet_address || '').trim() ||
+      String((req.body as any).tonAddress || (req.body as any).ton_address || '').trim();
+    if (rawWallet) {
+      try {
+        Address.parse(rawWallet);
+        buyerExpectedAddress = rawWallet;
+      } catch {
+        // ignore invalid wallet, will be resolved from users table below
+      }
+    }
+    if (!buyerExpectedAddress && buyerId != null) {
+      try {
+        const u = await db.query('SELECT ton_address FROM users WHERE telegram_id = $1 LIMIT 1', [buyerId]);
+        if (u.rows[0]?.ton_address) {
+          try {
+            Address.parse(String(u.rows[0].ton_address).trim());
+            buyerExpectedAddress = String(u.rows[0].ton_address).trim();
+          } catch {}
+        }
+      } catch {}
+    }
     const deal = await createDealRecord({
       buyerId,
       sellerId,
@@ -609,9 +633,12 @@ app.post(
       channelTitle,
       channelSnapshot,
       escrowHolderId,
+      buyerExpectedAddress,
     });
     const linkToken = await generateDealLink(deal.id);
-    const memo = depositComment(deal.id);
+    // P0-1: use unguessable deposit_token if present, fallback to legacy for pre-existing deals
+    const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
+    const memo = depositComment(deal.id, depositToken);
     const outMemo = releaseComment({ id: deal.id, amount, asset, terms });
     // Ensure the payment address is monitored for deposits (with comment)
     const payAddr = (deal as unknown as { payment_address?: string }).payment_address || resolvePaymentAddress();
@@ -2022,7 +2049,8 @@ app.get(
     if (!check) return res.status(404).json({ error: 'deal_not_found' });
     if (!check.hasAccess) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const deal = check.deal;
-    const memo = depositComment(dealId);
+    const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
+    const memo = depositComment(dealId, depositToken);
     const outMemo = releaseComment({ id: dealId, amount: deal.amount, asset: deal.asset, terms: deal.terms });
     const depositPayload = encryptedCommentToPayloadB64(memo);
     const releasePayload = encryptedCommentToPayloadB64(outMemo);
