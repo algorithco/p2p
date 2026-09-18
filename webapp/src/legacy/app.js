@@ -2221,9 +2221,43 @@
         );
       });
 
+      // Avatar with real Telegram profile photo: initials render instantly,
+      // then upgrade to the photo when GET /api/users/:id/photo resolves.
+      // Unknown partner (tgId null) keeps the "?" placeholder; photo misses
+      // keep initials — a missing photo must never blank the card.
+      function partyAvatar(tgId) {
+        var box = UI.h('div', {
+          class: 'avatar ' + UI.avatarClass(tgId),
+          text: String(tgId == null ? '?' : tgId).slice(-2),
+        });
+        if (tgId == null) return box;
+        try {
+          var p = Api.userPhoto ? Api.userPhoto(tgId) : null;
+          if (p && p.then) {
+            p.then(function (url) {
+              if (!url) return;
+              try {
+                var img = document.createElement('img');
+                img.className = 'avatar-img';
+                img.alt = '';
+                img.referrerPolicy = 'no-referrer';
+                img.onerror = function () {
+                  try {
+                    img.remove();
+                  } catch (e) {}
+                };
+                img.src = url;
+                box.textContent = '';
+                box.appendChild(img);
+              } catch (e) {}
+            }).catch(function () {});
+          }
+        } catch (e) {}
+        return box;
+      }
       function party(roleLabel, tgId, you) {
         return UI.h('div', { class: 'party' + (you ? ' you' : '') }, [
-          UI.h('div', { class: 'avatar ' + UI.avatarClass(tgId), text: String(tgId == null ? '?' : tgId).slice(-2) }),
+          partyAvatar(tgId),
           UI.h('div', { class: 'p-role', text: roleLabel + (you ? ' · Siz' : '') }),
           UI.h('div', { class: 'p-name', text: tgId ? 'ID ' + tgId : 'Sherik kutilmoqda' }),
         ]);
