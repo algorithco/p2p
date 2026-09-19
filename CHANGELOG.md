@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.0](https://github.com/algorithco/p2p/compare/v2.1.0...v2.2.0) (2026-09-19)
+
+
+### Features
+
+* **webapp:** use official USDT circular badge for USDT asset icon ([3f39122](https://github.com/algorithco/p2p/commit/3f391220228577cbd4a31c1b0881a770e36aba5c))
+* **webapp:** use official USDT circular badge for USDT asset icon ([f79947f](https://github.com/algorithco/p2p/commit/f79947ff7f773caed708eaef401443260f4f93d1))
+
 ## [2.1.0](https://github.com/algorithco/p2p/compare/v2.0.0...v2.1.0) (2026-09-18)
 
 
