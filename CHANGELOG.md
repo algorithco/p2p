@@ -1,5 +1,58 @@
 # Changelog
 
+## [2.3.0](https://github.com/algorithco/p2p/compare/v2.2.0...v2.3.0) (2026-09-19)
+
+
+### Features
+
+* **webapp:** simplify home hero, dark-blue wallet button with unplug icon ([328de33](https://github.com/algorithco/p2p/commit/328de33e3633bd34841004229719bcaca9d38e66))
+
+## [2.2.0](https://github.com/algorithco/p2p/compare/v2.1.0...v2.2.0) (2026-09-19)
+
+
+### Features
+
+* **webapp:** use official USDT circular badge for USDT asset icon ([3f39122](https://github.com/algorithco/p2p/commit/3f391220228577cbd4a31c1b0881a770e36aba5c))
+* **webapp:** use official USDT circular badge for USDT asset icon ([f79947f](https://github.com/algorithco/p2p/commit/f79947ff7f773caed708eaef401443260f4f93d1))
+
+## [2.1.0](https://github.com/algorithco/p2p/compare/v2.0.0...v2.1.0) (2026-09-18)
+
+
+### Features
+
+* **bot:** richer /start welcome with persistent Mini App bottom button ([11c2fdd](https://github.com/algorithco/p2p/commit/11c2fdd6fa9fd985f05dcd615b459d30ea30869b))
+* **bot:** richer /start welcome with persistent Mini App bottom button ([cb628cb](https://github.com/algorithco/p2p/commit/cb628cb949f5e27a3a905231e529b12b3433c84d))
+* deal party avatars show Telegram profile photos ([93ec80e](https://github.com/algorithco/p2p/commit/93ec80e7326fe9bd320c95103d530e354282f98a))
+* deal party avatars show Telegram profile photos ([31ba8f5](https://github.com/algorithco/p2p/commit/31ba8f5b30636607591ab16f53cd1378baf15483))
+* **webapp:** animate-ui icon set rendered natively, wired into UI ([c3257a9](https://github.com/algorithco/p2p/commit/c3257a997eeafe5fa42993276f938f7e6d4c8d14))
+* **webapp:** animate-ui icon set rendered natively, wired into UI ([28b9f84](https://github.com/algorithco/p2p/commit/28b9f84c5180af1927ffc3eefc0b671a8e055982))
+* **webapp:** chat join requests as message bubbles, drop top banner ([1792617](https://github.com/algorithco/p2p/commit/1792617f3955c9d7b0147825ea8d8db97013cb42))
+* **webapp:** chat join requests as message bubbles, drop top banner ([a68a423](https://github.com/algorithco/p2p/commit/a68a4238137781cc81937c8d4d8a06fdcf40aed7))
+* **webapp:** ton deal logo uses gram circular badge png ([ac8ab50](https://github.com/algorithco/p2p/commit/ac8ab501e636075a8d045c7bc5762626769e431a))
+* **webapp:** ton deal logo uses gram circular badge png ([e268b8c](https://github.com/algorithco/p2p/commit/e268b8cd9b79d4664948c4bebd862d8feb428d6b))
+
+
+### Bug Fixes
+
+* **backend:** sniff image magic bytes for avatar proxy ([3a67d1f](https://github.com/algorithco/p2p/commit/3a67d1f29950109cd9f58d9eab32219d0aa80885))
+* **backend:** sniff image magic bytes for avatar proxy ([ef4892d](https://github.com/algorithco/p2p/commit/ef4892d2adbea9410865f147545b44dc5dd0e9ef))
+* **bot:** add back button to help screen ([55403b1](https://github.com/algorithco/p2p/commit/55403b17d6d153c458468c7d9f60e16a65fbf48c))
+* **bot:** remove duplicate ReplyKeyboard, keep only inline Mini App buttons ([de7218d](https://github.com/algorithco/p2p/commit/de7218dc00b090b4723f58572c81bbcbff8da8fe))
+* **bot:** show rating in same message with back button ([16e20ee](https://github.com/algorithco/p2p/commit/16e20ee9c4c914f8ba8cc749c73553abe967601f))
+* **deploy:** backend host port loopback-only 127.0.0.1:3005 ([c890f90](https://github.com/algorithco/p2p/commit/c890f90dd0f2cb2c47b759778a8e82930dfac51f))
+* **deploy:** backend host port loopback-only 127.0.0.1:3005 ([3363263](https://github.com/algorithco/p2p/commit/3363263d2f051a4a884fb8832f7ba7c636e7a995))
+* **deps:** bump vitest to 4.1.11 in signer, checker, ubot ([853bb73](https://github.com/algorithco/p2p/commit/853bb73f1b8bc1f3497d6204697db8c6e02f86c0))
+* **deps:** keep signer on main's pg 8.23.0 ([35f3e00](https://github.com/algorithco/p2p/commit/35f3e0094267dcfe269ad877b47a91d695019a1c))
+* **security:** backend audit — authz, forgery, scheduler, custody fixes ([fecbb08](https://github.com/algorithco/p2p/commit/fecbb086511a4d619ff4b880da051ba3ba614b03))
+* **security:** backend audit — authz, forgery, scheduler, custody fixes ([4ad9128](https://github.com/algorithco/p2p/commit/4ad912838d5cee1608dbcd9320c8384aeb812c94))
+* **security:** close BUYER_CONFIRMED payout bypass, harden signer, lazy ubot ([3d1f161](https://github.com/algorithco/p2p/commit/3d1f161f23eb6d09d733d20f4bfeb2a533d8f7a9))
+* **security:** close BUYER_CONFIRMED payout bypass, harden signer, lazy ubot ([a229c9b](https://github.com/algorithco/p2p/commit/a229c9bd5ed1646fc96ac8bcbc605e2ce7de3f3d))
+* **security:** codeql log sink; native wallet modal replaces picker ([404b712](https://github.com/algorithco/p2p/commit/404b71268c26fba1d8da3bc924def90a87d27330))
+* **security:** resolve Dependabot vitest + CodeQL log-injection alerts ([c8a9daa](https://github.com/algorithco/p2p/commit/c8a9daabfab28753044909d5c7364f1b57ee988e))
+* **security:** sanitize checker logs, harden CI and defaults ([10a5c3d](https://github.com/algorithco/p2p/commit/10a5c3d6246c32fd8a9bea09ab66dda0a237fc8e))
+* **webapp:** dedupe concurrent deal action bar injection ([d37c1a0](https://github.com/algorithco/p2p/commit/d37c1a019da9745090370a949c542f3e8aeeced1))
+* **webapp:** dedupe concurrent deal action bar injection ([dfcd504](https://github.com/algorithco/p2p/commit/dfcd50453ea8268f7f5bf03704734f474af609d9))
+
 ## [2.0.0](https://github.com/algorithco/p2p/compare/v1.1.1...v2.0.0) (2026-09-18)
 
 
