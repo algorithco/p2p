@@ -1533,7 +1533,7 @@ export async function confirmTransferToEscrow(
     return { ok: false, error: 'only_seller_can_confirm' };
   }
   const st = String(deal.status || '').toUpperCase();
-  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(st)) {
+  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st)) {
     return { ok: false, error: `deal_finished: cannot confirm escrow on ${st} deal` };
   }
   const res = await checkEscrowHolderOwnership(dealId);
@@ -1555,6 +1555,7 @@ export async function payoutSellerForChannel(
   if (!deal) return { success: false, error: 'deal_not_found' };
   if (!isChannelDeal(deal)) return { success: false, error: 'not_channel_deal' };
   if (!deal.transfer_to_escrow_at) return { success: false, error: 'escrow_not_yet_received' };
+  if (String(deal.status) === DEAL_STATUS.CLOSED) return { success: false, error: 'already_closed' };
   if (String(deal.status) === DEAL_STATUS.RELEASED || String(deal.status) === DEAL_STATUS.REFUNDED)
     return { success: false, error: `already_${String(deal.status).toLowerCase()}` };
   // FRESH custody re-verification: the timestamp only proves escrow held the
@@ -1620,7 +1621,9 @@ export async function transferChannelToBuyer(
   const deal: any = await getDealById(dealId);
   if (!deal) return { ok: false, error: 'deal_not_found' };
   if (!isChannelDeal(deal)) return { ok: false, error: 'not_channel_deal' };
-  if (String(deal.status) !== DEAL_STATUS.RELEASED)
+  // CLOSED inherits RELEASED rights: the 5-min success-close must never strand a
+  // channel whose buyer still has to take over ownership (Telegram can force 24h waits).
+  if (String(deal.status) !== DEAL_STATUS.RELEASED && String(deal.status) !== DEAL_STATUS.CLOSED)
     return { ok: false, error: `invalid_status ${deal.status} need RELEASED (seller already paid)` };
   const channelId = deal.channel_username || deal.channel_id;
   if (!channelId) return { ok: false, error: 'channel_username_required' };

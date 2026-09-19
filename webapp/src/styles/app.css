@@ -728,6 +728,11 @@ a {
   background: var(--success-soft);
   color: var(--success);
 }
+.badge.st-closed {
+  background: var(--success-soft);
+  color: var(--success);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
 .badge.st-refunded {
   background: var(--danger-soft);
   color: var(--danger);

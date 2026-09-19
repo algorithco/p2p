@@ -7,18 +7,19 @@ import { describe, it, expect } from 'vitest';
 import { assertTransition, DEAL_ACTIONS } from './dealTransitions';
 
 describe('deal lifecycle state machine (no DB)', () => {
-  it('happy path: AWAITING -> CONFIRMED -> SENT -> RELEASED', () => {
+  it('happy path: AWAITING -> CONFIRMED -> SENT -> RELEASED -> CLOSED', () => {
     let status = 'AWAITING_DEPOSIT';
     for (const action of [
       DEAL_ACTIONS.DEPOSIT_DETECTED,
       DEAL_ACTIONS.MARK_SHIPPED,
       DEAL_ACTIONS.CONFIRM_RECEIPT,
+      DEAL_ACTIONS.CLOSE,
     ] as const) {
       const r = assertTransition(status, action);
       expect(r.ok).toBe(true);
       if (r.ok) status = r.next;
     }
-    expect(status).toBe('RELEASED');
+    expect(status).toBe('CLOSED');
   });
 
   it('expiry path: AWAITING -> REFUNDED', () => {

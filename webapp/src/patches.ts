@@ -485,19 +485,20 @@ async function injectWebappBar(view: HTMLElement, hash: string) {
   const dealType = String((deal as any).deal_type || (deal as any).dealType || 'P2P').toUpperCase();
   const isChannelDeal = dealType === 'CHANNEL' || dealType === 'GROUP';
   // ── Yakuniy holatlar — har ikki tomonga toast + banner (admin qarori ham shu yerda ko'rinadi) ──
-  if (st === 'RELEASED' || st === 'REFUNDED') {
-    const doneText = st === 'RELEASED' ? 'Yakunlandi — bitim yopildi' : 'Qaytarildi — pul xaridorga qaytdi';
+  // CLOSED is RELEASED archived by the success-close scheduler — same success copy.
+  const isReleased = st === 'RELEASED' || st === 'CLOSED';
+  if (isReleased || st === 'REFUNDED') {
+    const doneText = isReleased ? 'Yakunlandi — bitim yopildi' : 'Qaytarildi — pul xaridorga qaytdi';
     try {
       UI.toast(doneText, 'ok');
     } catch {}
     const doneBar = UI.h('div', { class: 'banner info webapp-bar', style: 'margin:12px 0' }, [
       UI.h('div', { class: 'small', style: 'display:flex;align-items:center;gap:8px' }, [
-        UI.icon(st === 'RELEASED' ? 'party-popper' : 'circle-check-big', 'ico-pop'),
+        UI.icon(isReleased ? 'party-popper' : 'circle-check-big', 'ico-pop'),
         UI.h('span', {
-          text:
-            st === 'RELEASED'
-              ? 'Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
-              : 'Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
+          text: isReleased
+            ? 'Yakunlandi — pul sotuvchiga chiqarildi. Chatda Tizim xabarini tekshiring.'
+            : 'Qaytarildi — pul xaridorga qaytdi. Chatda Tizim xabarini tekshiring.',
         }),
       ]),
     ]);
@@ -918,7 +919,7 @@ async function renderChannelEscrow(
     return;
   }
   // 5) Escrow received but not yet released — ask seller payout address
-  if (escrowAt && st !== 'RELEASED' && st !== 'REFUNDED' && isSeller) {
+  if (escrowAt && st !== 'RELEASED' && st !== 'CLOSED' && st !== 'REFUNDED' && isSeller) {
     const hasPayout = !!(payoutAddr && payoutAddr.trim());
     bar.appendChild(
       UI.h('div', { class: 'banner info' }, [
@@ -986,7 +987,7 @@ async function renderChannelEscrow(
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
-  if (escrowAt && st !== 'RELEASED' && isBuyer) {
+  if (escrowAt && st !== 'RELEASED' && st !== 'CLOSED' && isBuyer) {
     bar.appendChild(
       UI.h('div', { class: 'banner info' }, [
         UI.h('div', {
@@ -998,8 +999,8 @@ async function renderChannelEscrow(
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
-  // 6) RELEASED → buyer sets new owner
-  if (st === 'RELEASED' && isBuyer) {
+  // 6) RELEASED (or success-closed) → buyer sets new owner
+  if ((st === 'RELEASED' || st === 'CLOSED') && isBuyer) {
     const already = pendingOwner;
     if (!already) {
       bar.appendChild(
@@ -1070,7 +1071,7 @@ async function renderChannelEscrow(
     anchor.parentNode!.insertBefore(bar, anchor.nextSibling);
     return;
   }
-  if (st === 'RELEASED' && isSeller) {
+  if ((st === 'RELEASED' || st === 'CLOSED') && isSeller) {
     const dest = pendingOwner || 'xaridor tanlagan ega';
     bar.appendChild(
       UI.h('div', { class: 'banner info' }, [

@@ -38,7 +38,7 @@ export function registerAdminCommands(bot: Bot) {
   bot.command('disputes', async (ctx) => {
     if (!isAdminCtx(ctx)) return ctx.reply(`❌ Ruxsat yo'q.\nBu buyruq faqat admin uchun.`);
     const res = await db.query(
-      `SELECT * FROM deals WHERE confirmations->>'disputed' = 'true' AND status NOT IN ('RELEASED','REFUNDED') ORDER BY id DESC LIMIT 20`,
+      `SELECT * FROM deals WHERE confirmations->>'disputed' = 'true' AND status NOT IN ('RELEASED','REFUNDED','CLOSED') ORDER BY id DESC LIMIT 20`,
     );
     if (res.rows.length === 0) {
       await ctx.reply(`✅ Ochilgan nizolar yo'q.\nHammasi joyida.`);

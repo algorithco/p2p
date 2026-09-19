@@ -12,6 +12,7 @@ describe('P1-3 transition consistency — single source of truth', () => {
     { from: DEAL_STATUS.ITEM_SENT, next: DEAL_STATUS.RELEASED, action: DEAL_ACTIONS.RELEASE },
     { from: DEAL_STATUS.AWAITING_DEPOSIT, next: DEAL_STATUS.REFUNDED, action: DEAL_ACTIONS.EXPIRE },
     { from: DEAL_STATUS.DEPOSIT_CONFIRMED, next: DEAL_STATUS.REFUNDED, action: DEAL_ACTIONS.REFUND },
+    { from: DEAL_STATUS.RELEASED, next: DEAL_STATUS.CLOSED, action: DEAL_ACTIONS.CLOSE },
   ];
 
   it('assertTransition and isValidTransition agree for RELEASE/REFUND', () => {

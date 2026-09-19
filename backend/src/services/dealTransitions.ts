@@ -4,11 +4,11 @@
 //
 // This is the single owner of "what may a Deal become, and from where".
 // Everything that moves a Deal (HTTP routes, bot commands, the on-chain
-// listener, the 10h expiry scheduler) goes through assertTransition() before
-// touching the DB, and through guardedStatusUpdate() to write it. That
-// closes the race where the auto-close scheduler used to call the
-// unguarded updateDealStatus() and could refund a deal an admin had just
-// released.
+// listener, the 10h expiry scheduler, the success-close scheduler) goes
+// through assertTransition() before touching the DB, and through
+// guardedStatusUpdate() to write it. That closes the race where the
+// auto-close scheduler used to call the unguarded updateDealStatus() and
+// could refund a deal an admin had just released.
 //
 // Pure module: no DB imports at the top level, so it is unit-testable
 // without Postgres (see ./dealTransitions.test.ts).
@@ -27,6 +27,8 @@ export const DEAL_ACTIONS = {
   REFUND: 'REFUND',
   /** 10h auto-close of a deal with no deposit (record kept on server, shown as closed). */
   EXPIRE: 'EXPIRE',
+  /** Success-close: a RELEASED deal (seller paid) is archived ~5 min later. */
+  CLOSE: 'CLOSE',
 } as const;
 
 export type DealAction = (typeof DEAL_ACTIONS)[keyof typeof DEAL_ACTIONS];
@@ -45,6 +47,9 @@ export const TRANSITION_TABLE: Record<DealAction, ReadonlyArray<string>> = {
   // Use EXPIRE for DB-only close of AWAITING_DEPOSIT (no on-chain leg). Strict consolidation P1-3.
   [DEAL_ACTIONS.REFUND]: [DEAL_STATUS.DEPOSIT_CONFIRMED, DEAL_STATUS.ITEM_SENT],
   [DEAL_ACTIONS.EXPIRE]: [DEAL_STATUS.AWAITING_DEPOSIT],
+  // CLOSE leaves only RELEASED: success is defined as "seller paid". REFUNDED
+  // deals stay REFUNDED (already terminal, shown as Qaytarildi/Yopildi).
+  [DEAL_ACTIONS.CLOSE]: [DEAL_STATUS.RELEASED],
 };
 
 /** The status a Deal lands on once an action succeeds. */
@@ -55,6 +60,7 @@ export const NEXT_STATUS: Record<DealAction, string> = {
   [DEAL_ACTIONS.RELEASE]: DEAL_STATUS.RELEASED,
   [DEAL_ACTIONS.REFUND]: DEAL_STATUS.REFUNDED,
   [DEAL_ACTIONS.EXPIRE]: DEAL_STATUS.REFUNDED,
+  [DEAL_ACTIONS.CLOSE]: DEAL_STATUS.CLOSED,
 };
 
 /** Pure guard: is `action` legal from `currentStatus`? Returns the next status or an error. */
