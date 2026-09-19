@@ -1,6 +1,6 @@
 {
   "name": "p2pbot-root",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "description": "Root tooling for the p2pbot monorepo (lint, format, commit hooks). Service packages keep their own package.json + lockfiles.",
   "scripts": {
