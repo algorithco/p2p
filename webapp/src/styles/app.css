@@ -1798,22 +1798,30 @@ img.avatar {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 12px;
+  padding: 9px 14px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1.5px solid var(--border-strong);
+  background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
+  border: 1px solid rgba(147, 197, 253, 0.35);
   font-size: 13px;
   font-weight: 700;
-  color: #93c5fd;
+  color: #fff;
+  box-shadow:
+    0 8px 20px rgba(30, 64, 175, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
   backdrop-filter: blur(6px);
   transition:
     transform 0.15s var(--ease),
-    border-color 0.2s;
+    border-color 0.2s,
+    background 0.2s;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.wallet-pill .ico {
+  width: 16px;
+  height: 16px;
 }
 .wallet-pill.dot::before {
   content: '';
@@ -1828,8 +1836,10 @@ img.avatar {
   transform: scale(0.96);
 }
 .wallet-pill.connected {
-  border-color: var(--success);
+  background: var(--success-soft);
+  border-color: rgba(52, 211, 153, 0.4);
   color: var(--success);
+  box-shadow: none;
 }
 @media (min-width: 480px) {
   body {
@@ -2042,14 +2052,16 @@ button:hover .ico-ext {
    Greeting, stats, filter tabs and search above the deal list.
    Nothing below the search area or on other views is touched. */
 .home .hero {
-  padding: 14px 2px 4px;
+  padding: 16px 14px;
   margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
 }
-.home .hero-appicon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  margin-bottom: 10px;
+/* Home hero is flat now — no aurora backdrop. */
+.home .hero-aurora::before {
+  display: none;
 }
 .home .hero h1 {
   font-size: 20px;
