@@ -589,8 +589,56 @@
     { h: 168, label: '7 kun' },
   ];
 
+  // Idempotency key: one per wizard session. Retries reuse the SAME key so a
+  // timeout retry can never mint a second deal (backend dedups on it).
+  function genClientRequestId() {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+      var rb = new Uint8Array(16);
+      window.crypto.getRandomValues(rb);
+      rb[6] = (rb[6] & 0x0f) | 0x40;
+      rb[8] = (rb[8] & 0x3f) | 0x80;
+      var hx = function (i) {
+        return ('0' + rb[i].toString(16)).slice(-2);
+      };
+      return (
+        hx(0) +
+        hx(1) +
+        hx(2) +
+        hx(3) +
+        '-' +
+        hx(4) +
+        hx(5) +
+        '-' +
+        hx(6) +
+        hx(7) +
+        '-' +
+        hx(8) +
+        hx(9) +
+        '-' +
+        hx(10) +
+        hx(11) +
+        hx(12) +
+        hx(13) +
+        hx(14) +
+        hx(15)
+      );
+    } catch (e) {
+      return 'wz-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+    }
+  }
+
   function newWizard() {
-    return { step: 1, role: 'buy', asset: 'TON', amount: '', terms: '', deadlineH: 24 };
+    return {
+      step: 1,
+      role: 'buy',
+      asset: 'TON',
+      amount: '',
+      terms: '',
+      deadlineH: 24,
+      clientRequestId: genClientRequestId(),
+      submitting: false,
+    };
   }
 
   function viewCreate() {
@@ -640,7 +688,17 @@
 
     function submit() {
       var w = App.wz;
+      // Double-submit guard: the inline button AND the Telegram MainButton fire
+      // the same submit — without this, 2 taps = 2 POSTs = 2 deals (ghost copy).
+      if (w.submitting) return;
+      w.submitting = true;
+      // Freeze both triggers immediately (covers the inline+MainButton race).
+      try {
+        var sbtns = box.querySelectorAll('.btn-primary');
+        for (var sbi = 0; sbi < sbtns.length; sbi++) sbtns[sbi].setAttribute('disabled', '');
+      } catch (e) {}
       var me = App.state.meId || (TG.user && TG.user().id) || 0;
+      if (!w.clientRequestId) w.clientRequestId = genClientRequestId();
       var payload = {
         sellerId: w.role === 'sell' ? me : null,
         buyerId: w.role === 'buy' ? me : null,
@@ -649,12 +707,14 @@
         amount: parseFloat(w.amount),
         terms: w.terms || '',
         deadline: new Date(Date.now() + w.deadlineH * 3600000).toISOString(),
+        clientRequestId: w.clientRequestId,
       };
       if (!TG.available) UI.toast('Bitim yaratilmoqda…');
       else TG.main.show('Yaratilmoqda…', function () {}, { progress: true });
 
       Api.createDeal(payload)
         .then(function (res) {
+          w.submitting = false;
           TG.haptic.success();
           TG.preventClose(false);
           TG.main.hide();
@@ -664,6 +724,9 @@
           renderSuccess(res.deal, shareLink);
         })
         .catch(function (err) {
+          // Same clientRequestId is kept: a retry after timeout reuses it, so
+          // the backend returns the already-created deal instead of a duplicate.
+          w.submitting = false;
           TG.haptic.error();
           TG.main.hide();
           renderStep();
@@ -993,7 +1056,11 @@
         box.appendChild(
           UI.h('div', { class: 'btn-row' }, [
             UI.h('button', { class: 'btn btn-ghost', onclick: wizBack }, ['Orqaga']),
-            UI.h('button', { class: 'btn btn-primary', onclick: submit }, ['🔒 Bitim yaratish']),
+            UI.h(
+              'button',
+              { class: 'btn btn-primary', onclick: submit, disabled: App.wz.submitting ? true : undefined },
+              [App.wz.submitting ? 'Yaratilmoqda…' : '🔒 Bitim yaratish'],
+            ),
           ]),
         );
         if (TG.available) TG.main.show('🔒 Bitim yaratish', submit);

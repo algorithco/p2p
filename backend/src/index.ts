@@ -640,27 +640,39 @@ app.post(
         }
       } catch {}
     }
-    const deal = await createDealRecord({
-      buyerId,
-      sellerId,
-      buyerTelegramId: buyerId,
-      sellerTelegramId: sellerId,
-      asset: assetUpperPre,
-      amount: amtStrRaw,
-      feeBps: config.feeBps,
-      status: 'AWAITING_DEPOSIT',
-      contractAddress: '',
-      paymentAddress: resolvedPayAddr,
-      terms: terms || '',
-      deadline: deadlineDate,
-      dealType,
-      channelUsername: channelUsername as any,
-      channelId,
-      channelTitle,
-      channelSnapshot,
-      escrowHolderId,
-      buyerExpectedAddress,
-    });
+    // Idempotency: the wizard sends one clientRequestId per session and reuses it
+    // on retry — a repeated POST returns the same deal, never a ghost duplicate.
+    const rawClientKey = String((req.body as any).clientRequestId || (req.body as any).client_request_id || '').trim();
+    let deal;
+    try {
+      deal = await createDealRecord({
+        buyerId,
+        sellerId,
+        buyerTelegramId: buyerId,
+        sellerTelegramId: sellerId,
+        asset: assetUpperPre,
+        amount: amtStrRaw,
+        feeBps: config.feeBps,
+        status: 'AWAITING_DEPOSIT',
+        contractAddress: '',
+        paymentAddress: resolvedPayAddr,
+        terms: terms || '',
+        deadline: deadlineDate,
+        dealType,
+        channelUsername: channelUsername as any,
+        channelId,
+        channelTitle,
+        channelSnapshot,
+        escrowHolderId,
+        buyerExpectedAddress,
+        clientRequestId: rawClientKey || null,
+      });
+    } catch (e) {
+      if (String((e as Error).message || '') === 'concurrent_create_retry') {
+        return res.status(409).json({ error: 'concurrent_update_retry' });
+      }
+      throw e;
+    }
     const linkToken = await generateDealLink(deal.id);
     // P0-1: use unguessable deposit_token if present, fallback to legacy for pre-existing deals
     const depositToken = (deal as unknown as { deposit_token?: string }).deposit_token || null;
@@ -2406,7 +2418,7 @@ const API_DOCS = {
       method: 'POST',
       path: '/api/deals',
       auth: 'Identity (ADMIN_API_KEY may set explicit buyerId/sellerId)',
-      desc: 'Create deal {role: buy|sell, asset TON|USDT, amount, terms≤2000, deadline future?, dealType P2P|CHANNEL|GROUP, channelUsername?, buyerWalletAddress?} — caller becomes buyer (buy) or seller (sell), counterparty joins via link, returns {deal, link, webappLink, encryption}. 10/min.',
+      desc: 'Create deal {role: buy|sell, asset TON|USDT, amount, terms≤2000, deadline future?, dealType P2P|CHANNEL|GROUP, channelUsername?, buyerWalletAddress?, clientRequestId?} — caller becomes buyer (buy) or seller (sell), counterparty joins via link, returns {deal, link, webappLink, encryption}. clientRequestId (uuid, one per wizard session) makes retries idempotent: a repeated POST returns the same deal. 10/min.',
       errors:
         '400 asset_unsupported|amount_must_be_positive|terms_too_long · 401 · 429 · 503 payment_address_not_configured',
     },

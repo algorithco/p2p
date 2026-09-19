@@ -131,6 +131,14 @@ export async function ensureTables() {
   // P0-1 deposit token + buyer expected address for sender verification
   await ensureColumn('deals', 'deposit_token TEXT');
   await ensureColumn('deals', 'buyer_expected_address TEXT');
+  // Idempotent deal creation: one UUID per frontend wizard session. Retried
+  // POSTs with the same key return the existing deal (no ghost duplicates).
+  await ensureColumn('deals', 'client_request_id TEXT');
+  try {
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_deals_client_request_id ON deals(client_request_id) WHERE client_request_id IS NOT NULL AND client_request_id <> ''`,
+    );
+  } catch {}
   // unique index for deposit token (partial, only where not null)
   try {
     await pool.query(
