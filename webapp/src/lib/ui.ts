@@ -152,17 +152,21 @@ export function assetMeta(asset: string) {
 }
 /**
  * Round asset logo element: TON uses the Gram circular badge PNG
- * (/img/ton-badge.png, from the gram-pack); other assets keep the glyph
- * circle. Extra attrs (e.g. inline style) pass through to the wrapper.
+ * (/img/ton-badge.png, from the gram-pack); USDT uses the official Tether
+ * circular asset (/img/usdt-badge.png, from `public/usdt assets/`);
+ * other assets keep the glyph circle. Extra attrs (e.g. inline style)
+ * pass through to the wrapper.
  */
 export function assetIcon(am: { symbol: string; glyph: string; cls: string }, attrs?: Record<string, any>) {
-  if (String(am.symbol || '').toUpperCase() === 'TON') {
-    return h('div', Object.assign({ class: 'asset-glyph asset-ton has-img' }, attrs || {}), [
+  const sym = String(am.symbol || '').toUpperCase();
+  const imgSrc = sym === 'TON' ? '/img/ton-badge.png' : sym === 'USDT' ? '/img/usdt-badge.png' : null;
+  if (imgSrc) {
+    return h('div', Object.assign({ class: `asset-glyph ${am.cls} has-img` }, attrs || {}), [
       (() => {
         const img = document.createElement('img');
         img.className = 'asset-img';
-        img.src = '/img/ton-badge.png';
-        img.alt = 'TON';
+        img.src = imgSrc;
+        img.alt = sym;
         img.draggable = false;
         return img;
       })(),
