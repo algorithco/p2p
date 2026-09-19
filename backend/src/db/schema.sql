@@ -3,7 +3,7 @@
 -- Deal statuses (canonical webapp-first): AWAITING_DEPOSIT, DEPOSIT_CONFIRMED,
 -- ITEM_SENT, BUYER_CONFIRMED (legacy), RELEASE_PENDING / REFUND_PENDING
 -- (transient payout-in-progress, see escrowService guardedTransition),
--- RELEASED, REFUNDED.
+-- RELEASED, REFUNDED, CLOSED (RELEASED archived ~5 min after seller payout).
 
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
@@ -73,7 +73,7 @@ CREATE INDEX IF NOT EXISTS idx_deals_status ON deals(status);
 -- for constraints — see queries.ts ensureTables).
 ALTER TABLE deals ADD CONSTRAINT chk_deals_status CHECK (status IN (
   'AWAITING_DEPOSIT','DEPOSIT_CONFIRMED','ITEM_SENT',
-  'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED'
+  'RELEASE_PENDING','REFUND_PENDING','RELEASED','REFUNDED','CLOSED'
 ));
 
 CREATE TABLE IF NOT EXISTS notifications (

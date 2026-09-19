@@ -366,7 +366,7 @@ app.post(
     // Money-diversion guard: payout address is immutable once money is moving
     // or moved. Without this, a rewrite racing /approve diverts the payout.
     const payoutStatus = String(deal.status || '').toUpperCase();
-    if (['RELEASE_PENDING', 'REFUND_PENDING', 'RELEASED', 'REFUNDED'].includes(payoutStatus)) {
+    if (['RELEASE_PENDING', 'REFUND_PENDING', 'RELEASED', 'REFUNDED', 'CLOSED'].includes(payoutStatus)) {
       return res.status(409).json({ error: `deal_locked: payout address frozen in ${payoutStatus}` });
     }
     const raw = String(
@@ -462,7 +462,8 @@ app.post(
     if (!check.isParty && !adminApiKeyMatches(req)) return res.status(403).json({ error: 'not_a_party_to_deal' });
     const deal = check.deal as unknown as Record<string, unknown>;
     const status = String(deal.status || '').toUpperCase();
-    if (status === 'RELEASED' || status === 'REFUNDED') return res.status(400).json({ error: 'deal_finished' });
+    if (status === 'RELEASED' || status === 'REFUNDED' || status === 'CLOSED')
+      return res.status(400).json({ error: 'deal_finished' });
     if (status === 'RELEASE_PENDING' || status === 'REFUND_PENDING')
       return res.status(409).json({ error: 'deal_locked: payout in progress' });
     const buyerId = (deal.buyer_telegram_id ?? (deal as Record<string, unknown>).buyerTelegramId) as
@@ -764,7 +765,7 @@ app.post(
     }
     // No joining a finished or payout-in-flight deal — there is nothing to join.
     const dealStatus = String(deal.status || '').toUpperCase();
-    if (dealStatus === 'RELEASED' || dealStatus === 'REFUNDED') {
+    if (dealStatus === 'RELEASED' || dealStatus === 'REFUNDED' || dealStatus === 'CLOSED') {
       return res.status(409).json({ error: 'deal_finished: bitim allaqachon yakunlangan' });
     }
     if (dealStatus === 'RELEASE_PENDING' || dealStatus === 'REFUND_PENDING') {
@@ -1099,7 +1100,7 @@ app.post(
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller) ||
       (deal.seller_telegram_id != null && Number(deal.seller_telegram_id) === caller);
     if (!isParty) return res.status(403).json({ error: 'not_a_party_to_deal' });
-    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(String(deal.status))) {
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(String(deal.status))) {
       return res.status(409).json({ error: 'deal_finished: cannot dispute closed deal' });
     }
     await db.query(
@@ -1667,7 +1668,7 @@ app.post(
     const isBuyer = deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === caller;
     const isAdminCaller = isPrivileged(req, caller);
     if (!isBuyer && !isAdminCaller) return res.status(403).json({ error: 'only_buyer_can_set_new_owner' });
-    if (String(deal.status) !== 'RELEASED')
+    if (String(deal.status) !== 'RELEASED' && String(deal.status) !== 'CLOSED')
       return res.status(409).json({ error: `invalid_status ${deal.status} need RELEASED` });
     const raw = String(
       (req.body as any).newOwner || (req.body as any).new_owner || (req.body as any).username || '',
@@ -3007,7 +3008,8 @@ function startSchedulers() {
         );
         for (const d of old.rows) {
           if (isDisputedDeal(d)) continue;
-          if (String(d.status) === 'RELEASED' || String(d.status) === 'REFUNDED') continue;
+          if (String(d.status) === 'RELEASED' || String(d.status) === 'REFUNDED' || String(d.status) === 'CLOSED')
+            continue;
           try {
             // P1-3: single source validation via dealTransitions
 
@@ -3270,6 +3272,77 @@ function startSchedulers() {
         }
       } catch (e) {
         logger.warn('expiry scheduler failed', e);
+      }
+
+      // (a2) success-close: RELEASED deals older than 5 min become CLOSED.
+      // No fixed closing time is set at creation; the 5-min timer starts when
+      // the seller payout finalizes (resolved_at). resolved_at is deliberately
+      // NOT re-stamped — it stays the success moment (rating windows use it).
+      // No money moves here, so no on-chain checks: just a guarded archival.
+      // Disputed RELEASED deals stay open for admin review. Parties are not
+      // DM'd (the release already notified both sides); the deal chat gets a
+      // system message and the app shows "Yopildi" via the CLOSED badge.
+      try {
+        const { DEAL_ACTIONS, assertTransition, guardedStatusUpdate } = await import('./services/dealTransitions');
+        const won = await db.query(
+          `SELECT * FROM deals WHERE status = 'RELEASED'
+           AND COALESCE(resolved_at, updated_at) < now() - interval '5 minutes'
+           AND (confirmations->>'disputed' IS NULL OR confirmations->>'disputed' != 'true')
+           ORDER BY id ASC LIMIT 100`,
+        );
+        for (const d of won.rows) {
+          if (isDisputedDeal(d)) continue;
+          if (String(d.status) !== 'RELEASED') continue;
+          try {
+            const tr = assertTransition(String(d.status), DEAL_ACTIONS.CLOSE);
+            if (!tr.ok) {
+              logger.warn(`success-close skip deal #${sanitizeLogValue(d.id)}: ${tr.error}`);
+              continue;
+            }
+            const client = await db.connect();
+            let closed = false;
+            try {
+              await client.query('BEGIN');
+              const rowCount = await guardedStatusUpdate(client, Number(d.id), 'RELEASED', tr.next);
+              if (rowCount > 0) {
+                await client.query(
+                  `UPDATE deals SET confirmations = COALESCE(confirmations,'{}'::jsonb) || '{"successClosed":true}'::jsonb, updated_at = now() WHERE id = $1`,
+                  [d.id],
+                );
+                await client.query('COMMIT');
+                closed = true;
+              } else {
+                await client.query('ROLLBACK');
+              }
+            } catch (e) {
+              try {
+                await client.query('ROLLBACK');
+              } catch {}
+              throw e;
+            } finally {
+              client.release();
+            }
+            if (!closed) continue;
+            try {
+              const { addDealMessage } = await import('./services/dealService');
+              await addDealMessage(Number(d.id), 0, `Tizim: Yopildi (Deal #${d.id}).`);
+            } catch {}
+            try {
+              const { saveAdminAlert } = await import('./db/queries');
+              await saveAdminAlert(
+                'success_close',
+                `Deal #${d.id} muvaffaqiyatdan 5 daqiqa o'tib yopildi (RELEASED → CLOSED)`,
+                {
+                  dealId: Number(d.id),
+                },
+              );
+            } catch {}
+          } catch (e) {
+            logger.warn(`success-close failed for deal #${sanitizeLogValue(d.id)}`, e);
+          }
+        }
+      } catch (e) {
+        logger.warn('success-close scheduler failed', e);
       }
 
       // (b1) AWAITING_DEPOSIT with both parties, older 1h, !remPay -> reminderToPayer

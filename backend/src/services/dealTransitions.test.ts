@@ -77,6 +77,31 @@ describe('assertTransition', () => {
     expect(assertTransition('DEPOSIT_CONFIRMED', DEAL_ACTIONS.EXPIRE).ok).toBe(false);
   });
 
+  it('CLOSE allowed only from RELEASED (success = seller paid)', () => {
+    expect(assertTransition('RELEASED', DEAL_ACTIONS.CLOSE)).toEqual({
+      ok: true,
+      next: 'CLOSED',
+    });
+    for (const from of [
+      'AWAITING_DEPOSIT',
+      'DEPOSIT_CONFIRMED',
+      'ITEM_SENT',
+      'RELEASE_PENDING',
+      'REFUND_PENDING',
+      'REFUNDED',
+      'CLOSED',
+      'BUYER_CONFIRMED',
+    ]) {
+      expect(assertTransition(from, DEAL_ACTIONS.CLOSE).ok).toBe(false);
+    }
+  });
+
+  it('CLOSED is terminal — no action leaves it', () => {
+    for (const action of Object.values(DEAL_ACTIONS)) {
+      expect(assertTransition('CLOSED', action).ok).toBe(false);
+    }
+  });
+
   it('rejects unknown actions and empty status', () => {
     expect(assertTransition('AWAITING_DEPOSIT', 'BOGUS' as never).ok).toBe(false);
     expect(assertTransition('', DEAL_ACTIONS.RELEASE).ok).toBe(false);

@@ -11,6 +11,10 @@ import { dealPricing, fromBaseUnits } from '../utils/money';
  * between "payout attempt committed" and "on-chain send confirmed". They are never
  * final and never auto-retried — see reconcileStuckPayouts. Clients must treat any
  * unknown non-final status as "in progress".
+ * CLOSED is the archival state: a RELEASED deal moves here ~5 min after the seller
+ * payout finalizes (success-close scheduler in index.ts). CLOSED inherits every
+ * post-success read/continue right of RELEASED (channel set-new-owner /
+ * transfer-to-buyer, fee retry) — it only locks mutating pre-success actions.
  */
 export const DEAL_STATUS = {
   AWAITING_DEPOSIT: 'AWAITING_DEPOSIT',
@@ -21,6 +25,7 @@ export const DEAL_STATUS = {
   REFUND_PENDING: 'REFUND_PENDING',
   RELEASED: 'RELEASED',
   REFUNDED: 'REFUNDED',
+  CLOSED: 'CLOSED',
 } as const;
 
 export const DEAL_TYPE = {
@@ -29,7 +34,7 @@ export const DEAL_TYPE = {
   GROUP: 'GROUP',
 } as const;
 
-const FINAL_STATUSES = new Set<string>([DEAL_STATUS.RELEASED, DEAL_STATUS.REFUNDED]);
+const FINAL_STATUSES = new Set<string>([DEAL_STATUS.RELEASED, DEAL_STATUS.REFUNDED, DEAL_STATUS.CLOSED]);
 
 /** Shape used by every Telegram notification helper (single source of truth). */
 export function dealLike(deal: {
@@ -352,7 +357,7 @@ export async function atomicJoinDeal(dealId: number, token: string, telegramId: 
     if (dealRes.rows.length === 0) throw new Error('deal_not_found');
     const deal = dealRes.rows[0];
     const dealStatus = String(deal.status || '').toUpperCase();
-    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(dealStatus))
+    if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(dealStatus))
       throw new Error('deal_finished: cannot join a closed or locked deal');
     if (
       (deal.buyer_telegram_id != null && Number(deal.buyer_telegram_id) === Number(telegramId)) ||
@@ -575,7 +580,7 @@ export async function approveJoinRequest(
   const deal = await getDealById(req.deal_id);
   if (!deal) throw new Error('deal_not_found');
   const st = String((deal as any).status || '').toUpperCase();
-  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING'].includes(st))
+  if (['RELEASED', 'REFUNDED', 'RELEASE_PENDING', 'REFUND_PENDING', 'CLOSED'].includes(st))
     throw new Error('deal_finished: cannot join a closed or locked deal');
   // Only the creator (the already-joined party) can approve.
   const isCreator =

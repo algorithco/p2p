@@ -290,7 +290,7 @@
                   var st = String(deal.status || '').toUpperCase();
                   var kids = [];
                   if (st === 'RELEASE_PENDING' || st === 'REFUND_PENDING') kids.push(UI.icon('clock', ''));
-                  else if (st === 'RELEASED') kids.push(UI.icon('circle-check-big', 'ico-pop'));
+                  else if (st === 'RELEASED' || st === 'CLOSED') kids.push(UI.icon('circle-check-big', 'ico-pop'));
                   else {
                     try {
                       var c = deal.confirmations;
@@ -984,7 +984,7 @@
         done = 0;
       deals.forEach(function (d) {
         var u = String(d.status || '').toUpperCase();
-        if (u === 'RELEASED' || u === 'REFUNDED') done++;
+        if (u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED') done++;
         else active++;
       });
       stats.innerHTML = '';
@@ -1022,10 +1022,10 @@
         return true;
       }
       if (f === 'done') {
-        var isDone = u === 'RELEASED' || u === 'REFUNDED';
+        var isDone = u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED';
         if (!isDone) return false;
       } else {
-        if (u === 'RELEASED' || u === 'REFUNDED') return false;
+        if (u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED') return false;
       }
       if (q) {
         var hay = (
@@ -1172,9 +1172,10 @@
 
   /* ================= Create deal wizard ================= */
 
-  // Bitim muddati tanlanmaydi — har doim 10 soat. 10 soat ichida to'lov
-  // bo'lmasa bitim serverda saqlangan holda avtomatik yopiladi.
-  var DEAL_DURATION_H = 10;
+  // No fixed closing time is set at creation: the backend keeps the 10h
+  // unpaid auto-close (created_at based) and closes successful deals
+  // (RELEASED → CLOSED) 5 min after the seller payout. The wizard sends no
+  // per-deal deadline.
 
   function newWizard() {
     return { step: 1, role: 'buy', asset: 'TON', amount: '', terms: '' };
@@ -1235,7 +1236,6 @@
         asset: w.asset,
         amount: parseFloat(w.amount),
         terms: w.terms || '',
-        deadline: new Date(Date.now() + DEAL_DURATION_H * 3600000).toISOString(),
       };
       if (!TG.available) UI.toast('Bitim yaratilmoqda…');
       else TG.main.show('Yaratilmoqda…', function () {}, { progress: true });
@@ -2189,7 +2189,10 @@
         {
           label: 'Yuborildi',
           time:
-            deal.status === 'ITEM_SENT' || deal.status === 'RELEASED' || deal.status === 'REFUNDED'
+            deal.status === 'ITEM_SENT' ||
+            deal.status === 'RELEASED' ||
+            deal.status === 'REFUNDED' ||
+            deal.status === 'CLOSED'
               ? deal.updated_at
               : null,
         },

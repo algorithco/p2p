@@ -103,6 +103,9 @@ const STATUSES: Record<string, { label: string; cls: string; step: number }> = {
   REFUND_PENDING: { label: 'Pul qaytarilmoqda…', cls: 'st-pending', step: 2 },
   RELEASED: { label: 'Yakunlandi', cls: 'st-released', step: 3 },
   REFUNDED: { label: 'Qaytarildi', cls: 'st-refunded', step: 3 },
+  // CLOSED = RELEASED archived ~5 min after the seller payout (success-close).
+  // Same step as RELEASED so timelines render fully done.
+  CLOSED: { label: 'Yopildi', cls: 'st-closed', step: 3 },
 };
 function dealConfirmations(deal?: any): any {
   try {
@@ -142,7 +145,7 @@ export function statusMeta(status: string, deal?: any) {
 }
 export function isFinalStatus(status: string) {
   const u = String(status || '').toUpperCase();
-  return u === 'RELEASED' || u === 'REFUNDED';
+  return u === 'RELEASED' || u === 'REFUNDED' || u === 'CLOSED';
 }
 export function assetMeta(asset: string) {
   const a = String(asset || '').toUpperCase();
