@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.4.1](https://github.com/algorithco/p2p/compare/v2.4.0...v2.4.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **deals:** stop ghost duplicate deals on double-submit and retry ([2fb222f](https://github.com/algorithco/p2p/commit/2fb222fda6458ea51052a73c44b158927187fe1c))
+* **deals:** stop ghost duplicate deals on double-submit and retry ([098076e](https://github.com/algorithco/p2p/commit/098076eee5d3e429c62feee270271208083955a8))
+
 ## [2.4.0](https://github.com/algorithco/p2p/compare/v2.3.0...v2.4.0) (2026-09-19)
 
 
