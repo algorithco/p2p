@@ -669,13 +669,24 @@
           });
         },
       },
-      ['🔌 Hamyonni ulash'],
+      [UI.icon('unplug', ''), ' Hamyonni ulash'],
     );
     var wrap = UI.h(
       'div',
       { class: 'wallet-pill-wrap', style: 'display:flex;align-items:center;flex-wrap:wrap;gap:8px' },
       [btn, balEl],
     );
+
+    // Rebuild the disconnected pill (btn.textContent would drop the SVG icon).
+    var showConnect = function () {
+      btn.classList.remove('connected');
+      btn.classList.remove('dot');
+      while (btn.firstChild) btn.removeChild(btn.firstChild);
+      btn.appendChild(UI.icon('unplug', ''));
+      btn.appendChild(document.createTextNode(' Hamyonni ulash'));
+      balEl.textContent = '';
+      balEl.style.display = 'none';
+    };
 
     var render = function (acc) {
       var isConn = Wallet.connected();
@@ -691,7 +702,7 @@
           chain === -239 ? 'Mainnet' : chain === -3 ? 'Testnet' : chain != null ? 'Chain ' + chain : 'TON';
         btn.classList.add('connected');
         btn.classList.add('dot');
-        btn.textContent = '👛 ' + UI.shortAddr(friendly);
+        btn.textContent = UI.shortAddr(friendly);
         balEl.textContent = chainLabel;
         balEl.style.display = '';
         // Fetch balance async — merge into pill like mockup: "UQAb…7f2k · 42.18 TON"
@@ -701,20 +712,16 @@
             var ton = r.balanceTon || (Number(r.balance) / 1e9).toString();
             var n = Number(ton);
             var bal = isFinite(n) ? n.toFixed(4).replace(/\.?0+$/, '') + ' TON' : ton + ' TON';
-            btn.textContent = '👛 ' + UI.shortAddr(friendly) + ' · ' + bal;
+            btn.textContent = UI.shortAddr(friendly) + ' · ' + bal;
             balEl.textContent = chainLabel;
           })
           .catch(function (err) {
             console.warn('[App] balance fetch failed', err);
-            btn.textContent = '👛 ' + UI.shortAddr(friendly);
+            btn.textContent = UI.shortAddr(friendly);
             balEl.textContent = chainLabel;
           });
       } else {
-        btn.textContent = '🔌 Hamyonni ulash';
-        btn.classList.remove('connected');
-        btn.classList.remove('dot');
-        balEl.textContent = '';
-        balEl.style.display = 'none';
+        showConnect();
       }
     };
 
@@ -902,12 +909,7 @@
     var stats = UI.h('div', { class: 'stats-grid' });
     var listBox = UI.h('div', { class: 'deal-list' });
     var ptr = UI.h('div', { class: 'ptr', 'aria-hidden': 'true' }, [UI.h('div', { class: 'ptr-spinner' })]);
-    var heroAppIcon = UI.h('div', {
-      class: 'hero-appicon',
-      html: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 9l9 6 9-6-9-6Z"/><path d="M3 12 12 18l9-6"/><path d="M3 15 12 21l9-6"/></svg>',
-    });
     var heroEl = UI.h('div', { class: 'hero' }, [
-      heroAppIcon,
       UI.h('h1', { text: 'Salom, ' + name + ' 👋' }),
       UI.h('p', { text: "Mablag'ni escrow'da bloklang va ishonchli P2P savdo qiling. Har bir bitim himoyalangan." }),
       UI.h('div', { class: 'wallet-row' }, [walletPill()]),
@@ -1156,10 +1158,6 @@
     App._homeReload = load;
     bindPullToRefresh(document.getElementById('view'));
     requestAnimationFrame(moveThumb);
-    // Three.js hero backdrop (lazy, guarded, auto-disposed on route change)
-    try {
-      if (window.HeroFX) App.cleanupFns.push(window.HeroFX.mount(heroEl));
-    } catch (e) {}
     load(false);
 
     setTopbar('Savdochi');
@@ -1747,7 +1745,7 @@
                   });
               },
             },
-            ['🔌 Hamyonni ulash'],
+            [UI.icon('unplug', ''), ' Hamyonni ulash'],
           ),
           UI.h(
             'button',
